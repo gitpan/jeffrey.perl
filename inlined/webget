@@ -1,0 +1,2375 @@
+#!/usr/local/bin/perl -w
+#################################################################
+#### NOTE: THIS COPY HAS HAD LIBRARIES AUTOMATICALLY INLINED ####
+#################################################################
+$version = "960604.25";
+$comments = 'jfriedl@omron.co.jp';
+
+##
+## This is "webget"
+##
+## Jeffrey Friedl (jfriedl@omron.co.jp), July 1994.
+## Copyright 19.... ah hell, just take it.
+## Should work with either perl4 or perl5
+##
+## BLURB:
+## Given a URL on the command line (HTTP and FTP supported at the moment),
+## webget fetches the named object (HTML text, images, audio, whatever the
+## object happens to be). Will automatically use a proxy if one is defined
+## in the environment, follow "this URL has moved" responses, and retry
+## "can't find host" responses from a proxy in case host lookup was slow.
+## Supports users & passwords (FTP), Basic Authorization (HTTP), update-if-
+## modified (HTTP), and much more. Works with perl4 or perl5.
+
+##
+## More-detailed instructions in the comment block below the history list.
+##
+
+##
+## To-do:
+##   Fix up how error messages are passed among this and the libraries.
+##   Add gopher support.
+##        (not likely to happen soon.... see
+##             http://uts.cc.utexas.edu/~zippy/url_get.html
+##         which apparently supports gopher).
+##
+############################
+##
+##   960604.25 -- no changes, but want to bump out with a new version
+##        of www.pl which contains an important bugfix.
+##   960517.24 should now deal with errors from servers and proxies a bit
+##        better, exiting with error code 1.
+##
+##   960219.23  now can have @ in passwords, i.e
+##        ftp://anon:"jfriedl@omron.co.jp"@rtfm.mit.edu/
+##              ACCT  ^PASSWORD^^^^^^^^^^  ^HOST^^^^^^^
+##   960217.22  Added support for WebgetHOST, etc.
+##   960125.20  Added -spoof.
+##      Made timeouts more strictly followed.
+##      (related note: network.pl now has enhanced Linux support)
+##   951219.19   Lost ftp connections now die with a bit more grace.
+##   951031.16   Added -timeout.
+##   951017.15   Neat -pf, -postfile idea from Lorrie Cranor
+##     (http://www.ccrc.wustl.edu/~lorracks/)
+##   950911.13   Added Basic Authorization support for http.
+##   950911.12
+##     Implemented a most-excellent suggestion by Anthony D'Atri
+##     (aad@nwnet.net), to be able to automatically grab to a local file of
+##     the same name as the URL. See the '-nab' flag.
+##   950630.10   FTP now works when supplied with a userid & password
+##   950426.7    Complete Overhaul:
+##     Renamed from httpget. Added ftp support (very sketchy at the moment).
+##     Redid to work with new 'www.pl' library; chucked 'Www.pl' library.
+##   941227.5    Added -updateme. Cool!
+##   941107.4    Allowed for ^M ending a header line..
+##   940820.3    First sorta'clean net release.
+##
+##
+
+##
+##>
+##
+## Fetch http and/or ftp URL(s) given on the command line and spit to
+## STDOUT.
+##
+## GENERAL OPTIONS:
+##
+##  -V, -version
+##	Print version information; exit.
+##
+##  -q, -quiet
+##	Suppresses all non-essential informational messages.
+##
+##  -h, -help
+##	Show a usage message and exit.
+##
+##  -d, -debug
+##	Show some debugging messages.
+##
+##
+## OPTIONS REGARDING STYLE OF REMOTE-SERVER CONTACT:
+##
+##  -p, -post
+##	If the URL looks like a reply to a form (i.e. has a '?' in it),
+##	the request is POST'ed instead of GET'ed.
+##
+##
+##  -pf, -postfile
+##	The item after the '?' is taken as a local filename, and the contents
+##	are POST'ed as with -post
+##
+##  -head
+##	Gets the header only (for HTTP). This might include such useful
+##	things as 'Last-modified' and 'Content-length' fields
+##	(a lack of a 'Last-modified' might be a good indication that it's
+##	a CGI).
+##
+##      The "-head" option implies "-nostrip", but does *not* imply,
+##      for example "-nofollow".
+##
+##  -IfNewerThan FILE
+##  -int FILE
+##	Only pulls URLs if they are newer than the date the local FILE was
+##	last written.
+##
+##  -spoof BROWSER
+##      Some sites return different data for the same page depending upon
+##      the kind of browser it thinks you are. This is good. But this sux
+##      if you're trying to get the same type of data with webget and it
+##      decides to give you different (say, text-only) data. So, you can
+##      have webget pretend to be a particular browser. A few examples:
+##           -spoof NCSA_Mosaic
+##           -spoof SPRY_Mosaic/v8.32
+##           -spoof Mozilla/2.0
+##           -spoof 'NetManage Chameleon WebSurfer'
+##
+##      If you want to risk having the server delete all your files in spite,
+##      you could try
+##           -spoof 'Microsoft Internet Explorer/4.40.474beta (Windows 95)'
+##      but I sure wouldn't recommend it.
+##
+##
+## OPTIONS REGARDING HOW TO PROCESS WHAT IS RETURNED:
+##
+##  -nab, -f, -file
+##      Rather than spit the URL(s) to standard output, unconditionally
+##      dump to a file (or files) whose name is that as used in the URL,
+##      sans path. I like '-nab', but supply '-file' as well since that's
+##      what was originally suggested. Also see '-update' below for the
+## 	only-if-changed version.
+##
+##  -nnab
+##      Like -nab, but in addtion to dumping to a file, dump to stdout as well.
+##      Sort of like the 'tee' command.
+##
+##  -update, -refresh
+##	Do the same thing as -nab, etc., but does not bother pulling the
+##	URL if it older than the localfile. Only applies to HTTP.
+##	Uses the HTTP "If-Modified-Since" field. If the URL was not modified
+##	(and hence not changed), the return value is '2'.
+##
+##  -ns, -nostrip
+##	For HTTP items (including other items going through an HTTP proxy),
+##	the HTTP response header is printed rather than stripped as default.
+##
+##  
+## OPTIONS ABOUT NETWORK/HTTP/FTP ENVIRONMENT:
+##
+##  -nf, -nofollow
+##	Normally, a "this URL has moved" HTTP response is automatically
+##	followed. Not done with -nofollow.
+##
+##  -nr, -noretry
+##	Normally, an HTTP proxy response of "can't find host" is retried
+##	up to three times, to give the remote hostname lookup time to
+##	come back with an answer. This suppresses the retries. This is the
+##	same as '-retry 0'.
+##
+##  -r#, -retry#, -r #, -retry #
+##	Sets the number of times to retry. Default 3.
+##
+##  -np, -noproxy
+##	A proxy is not used, even if defined for the protocol.
+##
+##  -timeout TIMESPAN
+##  -to TIMESPAN
+##	Time out if a connection can not be made within the specified time
+##      period. TIMESPAN is normally in seconds, although a 'm' or 'h' may
+##	be appended to indicate minutes and hours. "-to 1.5m" would timeout
+##	after 90 seconds.
+##	
+##	(At least for now), a timeout causes immediate program death (with
+##	exit value 3).  For some reason, the alarm doesn't always cause a
+##	waiting read or connect to abort, so I just die immediately.. /-:
+##
+##	I might consider adding an "entire fetch" timeout, if someone
+##	wants it.
+##
+## OPTIONS THAT ARE TOO COOL TO FIT IN A GROUPING ABOVE :-)
+##
+##  -updateme
+## 	The special and rather cool flag "-updateme" will see if webget has
+## 	been updated since you got your version, and prepare a local
+## 	version of the new version for you to use. Keep updated!
+##
+############################
+##
+## PASSWORDS AND SUCH FOR FTP
+##
+##  You can use webget to do FTP fetches from non-Anonymous systems and
+##  accounts. Just put the required username and password into the URL,
+##  as with
+##	webget 'ftp://user:password@ftp.somesite.com/pub/pix/babe.gif
+##                    ^^^^^^^^^^^^^
+##  Note the user:password is separated from the hostname by a (the last,
+##  if more than one) '@'.
+##
+##  For anonymous FTP (the default for ftp URLs), the password is your
+##  username@hostname. The username is taken from the first of:
+##          "WebgetUSER" environment variable
+##          "USER"       environment variable
+##        or if neither defined, the string "WWWuser" is used.
+##  The hostname is taken from the first of
+##          "WebgetHOST" environment variable
+##          "HOST"       environment variable
+##        or if not defined, various means are used to try to detect your
+##        hostname (including running `hostname`)
+##
+##  Of course, you can also use the explicit USER:PASSWORD for anonymous
+##  FTP where you want explicit control of what is sent as your id. Just
+##  give the username 'anonymous' (or 'anon' or 'ftp' -- webget will supply
+##  the full "anonymous" for you) and an identification string:
+##
+##        ftp://anon:jfriedl@omron.co.jp@rtfm.mit.edu/....
+##              ACCT ^PASSWORD^^^^^^^^^^ ^HOST^^^^^^^
+##
+##  In any case, you can surround the password with double quotes for
+##  readablity:
+##        ftp://anon:"jfriedl@omron.co.jp"@rtfm.mit.edu/....
+##              ACCT  ^PASSWORD^^^^^^^^^^  ^HOST^^^^^^^
+##
+##  NOTE: using quotes makes the URL non-standard -- it's ok for webget use,
+##  but it's not a "real" URL any longer.
+##
+##  Also note that if you use a proxy, it almost certainly won't like being
+##  given a password with '@' in it. *Webget* knows that the real hostname
+##  begins after the _last_ '@', but some proxies (i.e the proxy I use :-)
+##  do not.
+##
+## PASSWORDS AND SUCH FOR HTTP
+##
+##  You can use the same kind of thing with HTTP, and if so it will provide
+##  what's know as Basic Authorization. This is >weak< authorization.  It
+##  also provides >zero< security -- I wouldn't be sending any credit-card
+##  numbers this way (unless you send them my way :-). It seems to be used
+##  most by providers of free stuff where they want to make some attempt to
+##  limit access to "known users".
+##
+## PROXY STUFF
+##
+##  If you need to go through a gateway to get out to the whole internet,
+##  you can use a proxy if one's been set up on the gateway. This is done
+##  by setting the "http_proxy" environment variable to point to the
+##  proxy server. Other variables are used for other target protocols....
+##  "gopher_proxy", "ftp_proxy", "wais_proxy", etc.
+##
+##  For example, I have the following in my ".login" file (for use with csh):
+##
+##       setenv http_proxy http://local.gateway.machine:8080/
+##
+##  This is to indicate that any http URL should go to local.gateway.machine
+##  (port 8080) via HTTP.  Additionally, I have
+##
+##       setenv gopher_proxy "$http_proxy"
+##       setenv wais_proxy   "$http_proxy"
+##       setenv ftp_proxy    "$http_proxy"
+##
+##  This means that any gopher, wais, or ftp URL should also go to the
+##  same place, also via HTTP. This allows webget to get, for example,
+##  GOPHER URLs even though it doesn't support GOPHER itself. It uses HTTP
+##  to talk to the proxy, which then uses GOPHER to talk to the destination.
+##
+##  Finally, if there are sites inside your gateway that you would like to
+##  connect to, you can list them in the "no_proxy" variable. This will allow
+##  you to connect to them directly and skip going through the proxy:
+##
+##       setenv no_proxy     "www.this,www.that,www.other"
+##
+##  I (jfriedl@omron.co.jp) have little personal experience with proxies
+##  except what I deal with here at Omron, so if this is not representative
+##  of your situation, please let me know.
+##
+## RETURN VALUE
+##  The value returned to the system by webget is rather screwed up because
+##  I didn't think about dealing with it until things were already
+##  complicated. Since there can be more than one URL on the command line,
+##  it's hard to decide what to return when one times out, another is fetched,
+##  another doesn't need to be fetched, and a fourth isn't found.
+##
+##  So, here's the current status:
+##   
+##	Upon any timeout (via the -timeout arg), webget immediately
+##	returns 3. End of story. Otherwise....
+##
+##	If any URL was fetched with a date limit (i.e. via
+##	'-update/-refresh/-IfNewerThan' and was found to not have changed,
+##	2 is returned. Otherwise....
+##
+##	If any URL was successfully fetched, 0 is returned. Otherwise...
+##
+##	If there were any errors, 1 is returned. Otherwise...
+##
+##	Must have been an info-only or do-nothing instance. 0 is returned.
+##
+##  Phew. Hopefully useful to someone.
+##<
+##
+
+## Where latest version should be.
+@WEB_base = ('http://www.wg.omron.co.jp/~jfriedl/perl/',
+	     'http://enterprise.ic.gc.ca/~jfriedl/perl/');
+$WEB_normal  = $WEB_base[0] . 'webget';
+$WEB_inlined = $WEB_base[0] . 'inlined/webget';
+
+&package_image_network_pl_init; ## automatic inline of "network.pl"
+&package_image_www_pl_init; ## automatic inline of "www.pl"
+$inlined=1;           ## this might be changed by a the inline thing.
+
+##
+## Exit values. All screwed up.
+##
+$EXIT_ok          = 0;
+$EXIT_error       = 1;
+$EXIT_notmodified = 2;
+$EXIT_timeout     = 3;
+##
+##
+
+{
+    local(@msg);
+    if (!defined($network'version) || $network'version < "960514.7") {
+	push(@msg, qq/upgrading "network.pl" is recommended/);
+    }
+    if (!defined($www'version) || $www'version < "960604.17") {
+	push(@msg, qq/upgrading "www.pl" is recommended/);
+    }
+    if (@msg) {
+	foreach $m (@msg) {
+	    warn qq/WARNING:\n$0: $m\n/;
+	}
+	warn((@msg > 1 ? 'These are' : 'It is') . ' available at:\n');
+	foreach $base (@WEB_base) {
+	    warn("\t$base\n");
+	}
+    }
+}
+  
+$WEB = $inlined ? $WEB_inlined : $WEB_normal;
+
+$debug = 0;
+$strip = 1;           ## default is to strip
+$quiet = 0;           ## also normally off.
+$follow = 1;          ## normally, we follow "Found (302)" links
+$retry = 3;           ## normally, retry proxy hostname lookups up to 3 times.
+$nab = 0;             ## If true, grab to a local file of the same name.
+$refresh = 0;	      ## If true, use 'If-Modified-Since' with -nab get.
+$postfile = 0;	      ## If true, filename is given after the '?'
+$defaultdelta2print = 2048;
+$TimeoutSpan = 0;     ## seconds after which we should time out.
+
+while (@ARGV && $ARGV[0] =~ m/^-/)
+{
+    $arg = shift(@ARGV);
+
+    $nab = 1,                           next if $arg =~ m/^-f(ile)?$/;
+    $nab = 1,                           next if $arg =~ m/^-nab$/;
+    $nab = 2,                           next if $arg =~ m/^-nnab$/;
+    $post = 1,				next if $arg =~ m/^-p(ost)?$/i;
+    $post = $postfile = 1,		next if $arg =~ m/^-p(ost)?f(ile)?$/i;
+    $quiet=1, 				next if $arg =~ m/^-q(uiet)?$/;
+    $follow = 0, 			next if $arg =~ m/^-no?f(ollow)?$/;
+    $strip = 0,				next if $arg =~ m/^-no?s(trip)?$/;
+    $debug=1, 				next if $arg =~ m/^-d(ebug)?$/;
+    $noproxy=1,				next if $arg =~ m/^-no?p(roxy)?$/;
+    $retry=0,				next if $arg =~ m/^-no?r(etry)?$/;
+    $retry=$2,				next if $arg =~ m/^-r(etry)?(\d+)$/;
+    &updateme				     if $arg eq '-updateme';
+    $strip = 0, $head = 1,              next if $arg =~ m/^-head(er)?/;
+    $nab = $refresh = 1,                next if $arg =~ m/^-(refresh|update)/;
+
+    &usage($EXIT_ok) if $arg =~ m/^-h(elp)?$/;
+    &show_version, exit($EXIT_ok) if $arg eq '-version' || $arg eq '-V';
+
+    if ($arg =~ m/^-t(ime)?o(ut)?$/i) {
+	local($num) = shift(@ARGV);
+        &usage($EXIT_error, "expecting timespan argument to $arg\n") unless
+		$num =~ m/^\d+(\d*)?[hms]?$/;
+	&timeout_arg($num);
+	next;
+    }
+    
+    if ($arg =~ m/^-if?n(ewer)?t(han)?$/i) {
+	$reference_file = shift(@ARGV);
+        &usage($EXIT_error, "expecting filename arg to $arg")
+	   if !defined $reference_file;
+        if (!-f $reference_file) {
+	   warn qq/$0: ${arg}\'s "$reference_file" not found.\n/;
+	   exit($EXIT_error);
+	}
+	next;
+    }
+
+    if ($arg eq '-spoof') {
+	local($spoof) = shift(@ARGV);
+	&usage($EXIT_error, "expecting arg to $arg\n") unless defined $spoof;
+	$www'useragent = $spoof; #'
+	next;
+    }
+
+    if ($arg eq '-r' || $arg eq '-retry') {
+	local($num) = shift(@ARGV);
+	&usage($EXIT_error, "expecting numerical arg to $arg\n") unless
+	   defined($num) && $num =~ m/^\d+$/;
+	$retry = $num;
+	next;
+    }
+    &usage($EXIT_error, qq/$0: unknown option "$arg"\n/);
+}
+
+if ($head && $post) {
+    warn "$0: combining -head and -post makes no sense, ignoring -post.\n";
+    $post = 0;
+    undef $postfile;
+}
+
+if ($refresh && defined($reference_file)) {
+    warn "$0: combining -update and -IfNewerThan make no sense, ignoring -IfNewerThan.\n";
+    undef $reference_file;
+}
+
+if (@ARGV == 0) {
+   warn "$0: nothing to do. Use -help for info.\n";
+   exit($EXIT_ok);
+}
+
+##
+## Now run through the remaining arguments (mostly URLs) and do a quick
+## check to see if they look well-formed. We won't *do* anything -- just
+## want to catch quick errors before really starting the work.
+##
+@tmp = @ARGV;
+$errors = 0;
+while (@tmp) {
+    $arg = shift(@tmp);
+    if ($arg =~ m/^-t(ime)?o(ut)?$/) {
+	local($num) = shift(@tmp);
+	if ($num !~ m/^\d+(\d*)?[hms]?$/) {
+	    &warn("expecting timespan argument to $arg\n");
+	    $errors++;
+	}		
+    } else {
+        local($protocol) = &www'grok_URL($arg, $noproxy); #'
+
+        if (!defined $protocol) {
+	    warn qq/can\'t grok "$arg"/;
+	    $errors++;
+	} elsif (!$quiet && ($protocol eq 'ftp')) {
+	    warn qq/warning: -head ignored for ftp URLs\n/   if $head;
+	    warn qq/warning: -refresh ignored for ftp URLs\n/if $refresh;
+	    warn qq/warning: -IfNewerThan ignored for ftp URLs\n/if defined($reference_file);
+
+        }
+    }
+}
+
+exit($EXIT_error) if $errors;
+
+$SuccessfulCount = 0;
+$NotModifiedCount = 0;
+
+##
+## Now do the real thing.
+##
+while (@ARGV) {
+    $arg = shift(@ARGV);
+    if ($arg =~ m/^-t(ime)?o(ut)?$/) {
+	&timeout_arg(shift(@ARGV));
+    } else {
+	&fetch_url($arg);
+    }
+}
+
+if ($NotModifiedCount) {
+    exit($EXIT_notmodified);
+} elsif ($SuccessfulCount) {
+    exit($EXIT_ok);
+} else {
+    exit($EXIT_error);
+}
+
+###########################################################################
+###########################################################################
+
+sub timeout_arg
+{
+    ($TimeoutSpan) = @_;
+			    $TimeoutSpan =~ s/s//;  
+    $TimeoutSpan *=   60 if $TimeoutSpan =~ s/m//;
+    $TimeoutSpan *= 3600 if $TimeoutSpan =~ s/h//;
+
+}
+
+##
+## As a byproduct, returns the basename of $0.
+##
+sub show_version
+{
+    local($base) = $0;
+    $base =~ s,.*/,,;
+    print STDERR "This is $base version $version\n";
+    $base;
+}
+
+##
+## &usage(exitval, message);
+##
+## Prints a usage message to STDERR.
+## If MESSAGE is defined, prints that first.
+## If exitval is defined, exits with that value. Otherwise, returns.
+##
+sub usage
+{
+    local($exit, $message) = @_;
+
+    print STDERR $message if defined $message;
+    local($base) = &show_version;
+    print STDERR <<INLINE_LITERAL_TEXT;
+usage: $0 [options] URL ...
+  Fetches and displays the named URL(s). Supports http and ftp.
+  (if no protocol is given, a leading "http://" is normally used).
+
+Options are from among:
+  -V, -version    Print version information; exit.
+  -p, -post       If URL looks like a form reply, does POST instead of GET.
+  -pf, -postfile  Like -post, but takes everything after ? to be a filename.
+  -q, -quiet      All non-essential informational messages are suppressed.
+  -nf, -nofollow  Don\'t follow "this document has moved" replies.
+  -nr, -noretry   Doesn\'t retry a failed hostname lookup (same as -retry 0)
+  -r #, -retry #  Sets failed-hostname-lookup-retry to # (default $retry)
+  -np, -noproxy   Uses no proxy, even if one defined for the protocol.
+  -ns, -nostrip   The HTTP header, normally elided, is printed.
+  -head           gets item header only (implies -ns)
+  -nab, -file     Dumps output to file whose name taken from URL, minus path
+  -nnab           Like -nab, but *also* dumps to stdout.
+  -update         HTTP only. Like -nab, but only if the page has been modified.
+  -h, -help       Prints this message.
+  -IfNewerThan F  HTTP only. Only brings page if it is newer than named file.
+  -timeout T      Fail if a connection can\'t be made in the specified time.
+
+  -updateme       Pull the latest version of $base from
+		    $WEB
+                  and reports if it is newer than your current version.
+
+Comments to $comments.
+INLINE_LITERAL_TEXT
+
+    exit($exit) if defined $exit;
+}
+
+##
+## Pull the latest version of this program to a local file.
+## Clip the first couple lines from this executing file so that we
+## preserve the local invocation style.
+##
+sub updateme
+{
+    ##
+    ## Open a temp file to hold the new version,
+    ## redirecting STDOUT to it.
+    ##
+    open(STDOUT, '>'.($tempFile="/tmp/webget.new"))     ||
+    open(STDOUT, '>'.($tempFile="/usr/tmp/webget.new")) ||
+    open(STDOUT, '>'.($tempFile="/webget.new"))         ||
+    open(STDOUT, '>'.($tempFile="webget.new"))          ||
+	die "$0: can\'t open a temp file.\n";
+
+    ##
+    ## See if we can figure out how we were called.
+    ## The seek will rewind not to the start of the data, but to the
+    ## start of the whole program script.
+    ## 
+    ## Keep the first line if it begins with #!, and the next two if they
+    ## look like the trick mentioned in the perl man page for getting
+    ## around the lack of #!-support.
+    ##
+    if (seek(DATA, 0, 0)) { ## 
+	$_ = <DATA>; if (m/^#!/) { print STDOUT;
+	    $_ = <DATA>; if (m/^\s*eval/) { print STDOUT;
+		$_ = <DATA>; if (m/^\s*if/) { print STDOUT; }
+	    }
+	}
+	print STDOUT "\n#-\n";
+    }
+
+    ## Go get the latest one...
+    local(@options);
+    push(@options, 'head') if $head;
+    push(@options, 'nofollow') unless $follow;
+    push(@options, ('retry') x $retry) if $retry;
+    push(@options, 'quiet') if $quiet;
+    push(@options, 'debug') if $debug;
+    local($status, $memo, %info) = &www'open_http_url(*IN, $WEB, @options); #'
+    die "fetching $WEB:\n   $memo\n" unless $status eq 'ok';
+
+    $size = $info{'content-length'};
+    while (<IN>)
+    {
+	$size -= length;
+	print STDOUT;
+	if (!defined $fetched_version && m/version\s*=\s*"([^""]+)"/) {
+	    $fetched_version = $1;
+	    &general_read(*IN, $size, 0);
+	    last;
+	}
+    }
+    
+    $fetched_version = "<unknown>" unless defined $fetched_version;
+
+    ##
+    ## Try to update the mode of the temp file with the mode of this file.
+    ## Don't worry if it fails.
+    ##
+    chmod($mode, $tempFile) if $mode = (stat($0))[2];
+
+    $as_well = '';
+    if ($fetched_version eq $version)
+    {
+	print STDERR "You already have the most-recent version ($version).\n",
+		     qq/FWIW, the newly fetched one has been left in "$tempFile".\n/;
+    }
+    elsif ($fetched_version <= $version)
+    {
+	print STDERR
+	    "Mmm, your current version seems newer (?!):\n",
+	    qq/  your version: "$version"\n/,
+	    qq/  new version:  "$fetched_version"\n/,
+	    qq/FWIW, fetched one left in "$tempFile".\n/;
+    }
+    else
+    {
+	print STDERR
+	    "Indeed, your current version was old:\n",
+	    qq/  your version: "$version"\n/,
+	    qq/  new version:  "$fetched_version"\n/,
+	    qq/The file "$tempFile" is ready to replace the old one.\n/;
+	print STDERR qq/Just do:\n  % mv $tempFile $0\n/ if -f $0;
+	$as_well = ' as well';
+    }
+    print STDERR "Note that the libraries it uses may (or may not) need updating$as_well.\n"
+	unless $inlined;
+    exit($EXIT_ok);
+}
+
+##
+## Given a list of URLs, fetch'em.
+## Parses the URL and calls the routine for the appropriate protocol
+##
+sub fetch_url
+{
+    local(@todo) = @_;
+    local(%circref, %hold_circref);
+
+    URL_LOOP: while (@todo)
+    {
+	$URL = shift(@todo);
+	%hold_circref = %circref; undef %circref;
+
+	local($protocol, @args) = &www'grok_URL($URL, $noproxy); #'
+
+	if (!defined $protocol) {
+	    &www'message(1, qq/can\'t grok "$URL"/); #'
+ 	    next URL_LOOP;
+	}
+
+	## call protocol-specific handler
+	local($old_alarm) = $SIG{'ALRM'} || 'DEFAULT';
+	$func = "fetch_via_" . $protocol;
+	$error = &$func(@args, $TimeoutSpan);
+	$SIG{'ALRM'} = $old_alarm;
+
+	if (defined $error) {
+	    $error =~ s/\n*$/\n/; ## ensure one ending newline.
+    	    &www'message(1, "$URL: $error"); #'
+	} else {
+	    $SuccessfulCount++;
+        }
+    } 
+}
+
+sub filedate
+{
+   local($filename) = @_;
+   local($filetime) = (stat($filename))[9];
+   return 0 if !defined $filetime;
+   local($sec, $min, $hour, $mday, $mon, $year, $wday) = gmtime($filetime);
+   return 0 if !defined $wday;
+   sprintf(qq/"%s, %02d-%s-%02d %02d:%02d:%02d GMT"/,
+	("Sunday", "Monday", "Tuesdsy", "Wednesday",
+         "Thursday", "Friday", "Saturday")[$wday],
+	$mday,
+	("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[$mon],
+	$year,
+	$hour,
+	$min,
+	$sec);
+}
+
+sub local_filename
+{
+    local($filename) = @_;
+    $filename =~ s,/+$,,;        ## remove any trailing slashes
+    $filename =~ s,.*/,,;        ## remove any leading path
+    if ($filename eq '') {
+	## empty -- pick a random name
+	$filename = "file0000";
+	## look for a free random name.
+	$filename++ while -f $filename;
+    }
+    $filename;
+}
+
+sub set_output_file
+{
+    local($filename) = @_;
+    if (!open(OUT, ">$filename")) {
+	&www'message(1, "$0: can\'t open [$filename] for output"); #'
+    } else {
+	open(SAVEOUT, ">>&STDOUT") || die "$!";;
+	open(STDOUT, ">>&OUT");
+    }
+}
+
+sub close_output_file
+{
+    local($filename) = @_;
+    unless ($quiet)
+    {
+	local($note) = qq/"$filename" written/;
+	if (defined $error) {
+	    $note .= " (possibly corrupt due to error above)";
+	}
+	&www'message(1, "$note."); #'
+    }
+    close(STDOUT);
+    open(STDOUT, ">&SAVEOUT");
+}
+
+sub http_alarm
+{
+    &www'message(1, "ERROR: $AlarmNote."); #'
+    exit($EXIT_timeout);  ## the alarm doesn't seem to cause a waiting syscall to break?
+#   $HaveAlarm = 1;
+}
+
+##
+## Given the host, port, and path, and (for info only) real target,
+## fetch via HTTP.
+##
+## If there is a user and/or password, use that for Basic Authorization.
+##
+## If $timeout is nonzero, time out after that many seconds.
+##
+sub fetch_via_http
+{
+    local($host, $port, $path, $target, $user, $password, $timeout) = @_;
+    local(@options);
+    local($local_filename);
+
+    ##
+    ## If we're posting, but -postfile was given, we need to interpret
+    ## the item in $path after '?' as a filename, and replace it with
+    ## the contents of the file.
+    ##
+    if ($postfile && $path =~ s/\?([\d\D]*)//) {
+	local($filename) = $1;
+ 	return("can't open [$filename] to POST") if !open(IN, "<$filename");
+	local($/) = ''; ## want to suck up the whole file.
+	$path .= '?' . <IN>;
+	close(IN);
+    }
+
+    $local_filename = &local_filename($path)
+	if $refresh || $nab || defined($reference_file);
+    $refresh = &filedate($local_filename) if $refresh;
+    $refresh = &filedate($reference_file) if defined($reference_file);
+
+    push(@options, 'head') if $head;
+    push(@options, 'post') if $post;
+    push(@options, 'nofollow') unless $follow;
+    push(@options, ('retry') x 3);
+    push(@options, 'quiet') if $quiet;
+    push(@options, 'debug') if $debug;
+    push(@options, "ifmodifiedsince=$refresh") if $refresh;
+
+    if (defined $password || defined $user) {
+	local($auth) = join(':', ($user || ''), ($password || ''));
+	push(@options, "authorization=$auth");
+    }
+
+    if ($timeout) {
+	$SIG{'ALRM'} = "main'http_alarm";
+#	$HaveAlarm = 0;
+	$AlarmNote = "host $host";
+	$AlarmNote .= ":$port" if $port != $www'default_port{'http'}; #'
+	$AlarmNote .= " timed out after $timeout second";
+	$AlarmNote .= 's' if $timeout > 1;
+	alarm($timeout);
+    }
+    local($result, $memo, %info) =
+	&www'open_http_connection(*HTTP, $host,$port,$path,$target,@options);#'
+
+    alarm(0) if $timeout;
+
+#    if ($HaveAlarm) {
+#	close(HTTP);
+#	$error = "timeout after $timeout second";
+#	$error .= "s" if $timeout > 1;
+#	return $error;
+#    }
+
+    if ($follow && ($result eq 'follow')) {
+	%circref = %hold_circref;
+	$circref{$memo} = 1;
+	unshift(@todo, $memo);
+	return undef;
+    }
+    if ($result eq 'error') {
+	$memo .= "\n" . $info{'BODY'} if defined $info{'BODY'};
+	return $memo;
+    }
+
+    if (!$quiet && $result eq 'status' && ! -t STDOUT) {
+	#&www'message(1, "Warning: $memo"); #'
+	$error = "Warning: $memo";
+    }
+
+    if ($info{'CODE'} == 304) { ## 304 is magic for "Not Modified"
+	alarm($timeout) if $timeout;
+	close(HTTP);
+	alarm(0) if $timeout;
+
+        &www'message(1, "$URL: Not Modified") unless $quiet; #'
+	$NotModifiedCount++;
+	return undef; ## no error
+    }
+
+    &set_output_file($local_filename) if $nab;
+
+    unless($strip) {
+        print         $info{'STATUS'}, "\n", $info{'HEADER'}, "\n";
+        print SAVEOUT $info{'STATUS'}, "\n", $info{'HEADER'}, "\n" if $nab==2;
+    }
+
+    local($doneread) = 0;
+    if (defined $info{'BODY'}) {
+        print         $info{'BODY'};
+	print SAVEOUT $info{'BODY'} if $nab==2;
+	$doneread = length $info{'BODY'};
+    }
+
+    if (!$head) {
+	&general_read(*HTTP, $info{'content-length'}, $doneread, $timeout);
+    }
+    alarm($timeout) if $timeout;
+    close(HTTP);
+    alarm(0) if $timeout;
+
+    &close_output_file($local_filename) if $nab;
+
+    $error; ## will be 'undef' if no error;
+}
+
+sub fetch_via_ftp
+{
+    local($host, $port, $path, $target, $user, $password, $timeout) = @_;
+    local($local_filename) = &local_filename($path);
+    local($ftp_debug) = $debug;
+    local(@password) = ($password);
+    $path =~ s,^/,,;  ## remove a leading / from the path.
+    $path = '.' if $path eq ''; ## make sure we have something
+
+    if (!defined $user) {
+	$user = 'anonymous';
+	$password = $ENV{'WebgetUSER'} || $ENV{'USER'} || 'WWWuser';
+	local($host) = $ENV{'WebgetHOST'} || $ENV{'HOST'} ||
+          &network'addr_to_ascii(&network'my_addr) || '';
+	@password = ($password.'@'.$host);
+        push(@password, $password.'@') if $host;
+    } elsif (!defined $password) {
+	@password = ("");
+    }
+
+    ## allow 'anon' or 'ftp' as shorthands.
+    $user = 'anonymous' if ($user eq 'anon') || ($user eq 'ftp');
+
+    local($_last_ftp_reply, $_passive_host, $_passive_port);
+    local($size);
+
+    sub _ftp_get_reply
+    {
+        alarm($timeout) if $timeout;
+	local($text) = scalar(<FTP_CONTROL>);
+	alarm(0) if $timeout;
+
+	die "lost connection to $host\n" if !defined $text;
+
+	local($_, $tmp);
+	print STDERR "READ: $text" if $ftp_debug;
+	die "internal error: expected reply code in response from ".
+	    "ftp server [$text]" unless $text =~ s/^(\d+)([- ])//;
+	local($code) = $1;
+	if ($2 eq '-') {
+	    while (1) {
+		alarm($timeout) if $timeout;
+		$_ = <FTP_CONTROL>;
+		alarm(0) if $timeout;
+		last if !defined $_;
+
+		($tmp = $_) =~ s/^\d+[- ]//;
+		$text .= $tmp;
+		last if m/^$code /;
+	    }
+	}
+	$text =~ s/^\d+ ?/<foo>/g;
+        ($code, $text);
+    }
+
+    sub _ftp_expect
+    {
+	local($code, $text) = &_ftp_get_reply;
+	$_last_ftp_reply = $text;
+	foreach $expect (@_) {
+	    return ($code, $text) if $code == $expect;
+	}
+	die "internal error: expected return code ".
+	    join('|',@_).", got [$text]";
+    }
+
+    sub _ftp_send
+    {
+	print STDERR "SEND: ", @_ if $ftp_debug;
+	alarm($timeout) if $timeout;
+	print FTP_CONTROL @_;
+	alarm(0) if $timeout;
+    }
+
+    sub _ftp_do_passive
+    {
+	local(@commands) = @_;
+
+	&_ftp_send("PASV\r\n");
+	local($code) = &_ftp_expect(227, 125);
+
+	if ($code == 227)
+	{
+ 	    die "internal error: can't grok passive reply [$_last_ftp_reply]"
+		unless $_last_ftp_reply =~ m/\(([\d,]+)\)/;
+	    local($a,$b,$c,$d, $p1, $p2) = split(/,/, $1);
+	    ($_passive_host, $_passive_port) =
+		("$a.$b.$c.$d", $p1*256 + $p2);
+	}
+
+	foreach(@commands) {
+	    &_ftp_send($_);
+	}
+
+	alarm($timeout) if $timeout;
+	local($error)= &network'connect_to(*PASSIVE, $_passive_host, $_passive_port);#'
+	alarm(0) if $timeout;
+	die "internal error: passive ftp connect [$error]" if $error;
+    }
+
+    sub done {
+	local($message) = shift;
+	alarm($timeout) if $timeout;
+	close(FTP_CONTROL);
+	alarm(0) if $timeout;
+        $message;
+    }
+
+    ## make the connection to the host
+    &www'message($debug, "connecting to $host...") unless $quiet;#'
+
+    if ($timeout) {
+	$SIG{'ALRM'} = "main'http_alarm"; ## can use this for now
+#	$HaveAlarm = 0;
+	$AlarmNote = "host $host";
+	$AlarmNote .= ":$port" if $port != $www'default_port{'ftp'};#'
+	$AlarmNote .= " timed out after $timeout second";
+	$AlarmNote .= 's' if $timeout > 1;
+	alarm($timeout);
+    }
+
+    local($error) = &network'connect_to(*FTP_CONTROL, $host, $port);#'
+
+    alarm(0) if $timeout;
+
+    return $error if $error;
+
+    local ($code, $text) = &_ftp_get_reply;
+    return &done("internal ftp error: [$text]") if ($code != 220);
+
+    ## log in
+    &www'message($debug, "logging in as $user...") unless $quiet;#'
+    foreach $password (@password)
+    {
+	&_ftp_send("USER $user\r\n");
+	($code, $text) = &_ftp_expect(230,331,530);
+	return &done($text) if $code == 530;
+	last if $code == 230; ## hey, already logged in, cool.
+
+	&_ftp_send("PASS $password\r\n");
+	($code, $text) = &_ftp_expect(220,230,530,550,332);
+	last if $code != 550;
+	last if $text =~ m/can\'t change directory/;
+    }
+
+    if ($code == 550)
+    {
+	$text =~ s/\n+$//;
+ 	&www'message(1, "Can\'t log in $host: $text") unless $quiet;#'
+	exit($EXIT_error);
+    }
+
+    if ($code == 332)
+    {
+	 &_ftp_send("ACCT noaccount\r\n");
+	 ($code, $text) = &_ftp_expect(230, 202, 530, 500,501,503, 421)
+    }
+    return &done($text) if $code >= 300;
+
+    &_ftp_send("TYPE I\r\n");
+    &_ftp_expect(200);
+
+    unless ($quiet) {
+	local($name) = $path;
+	$name =~ s,.*/([^/]),$1,;
+        &www'message($debug, "requesting $name...");#'
+    }
+    ## get file
+    &_ftp_do_passive("RETR $path\r\n");
+    ($code,$text) = &_ftp_expect(125, 150, 550, 530);
+    return &done($text) if $code == 530;
+
+    if ($code == 550)
+    {
+	alarm($timeout) if $timeout;
+	close(PASSIVE);
+	alarm(0) if $timeout;
+
+	if ($text =~ /directory/i) {
+	    ## probably from "no such file or directory", so just return now.
+	    return &done($text);
+	}
+
+	## do like Mosaic and try getting a directory listing.
+	&_ftp_send("CWD $path\r\n");
+	($code) = &_ftp_expect(250,550);
+	return &done($text) if $code == 550;
+	&_ftp_do_passive("LIST\r\n");
+	&_ftp_expect(125, 150);
+    }
+
+    $size = $1 if $text =~ m/(\d+)\s+bytes/;
+    binmode(PASSIVE); ## just in case.
+    &www'message($debug, "waiting for data...") unless $quiet;#'
+    &set_output_file($local_filename) if $nab;
+    &general_read(*PASSIVE, $size, 0, $timeout);
+    &close_output_file($local_filename) if $nab;
+
+    alarm($timeout) if $timeout;
+    close(PASSIVE);
+    close(FTP_CONTROL);
+    alarm(0) if $timeout;
+
+    undef;
+}
+
+sub general_read
+{
+    local(*INPUT, $size2read, $bytesread, $timeout) = @_;
+    local($lastcount) = (0,0);
+    local($need_to_clear) = 0;
+    local($start_time) = time;
+    local($last_time, $time) = $start_time;
+    ## Figure out how often to print the "bytes read" message
+    local($delta2print) =
+	(defined $size2read) ? int($size2read/50) : $defaultdelta2print;
+
+    $bytesread = 0 if !$bytesread;
+    &www'message(0, "read $bytesread bytes") unless $quiet; #'
+
+    ## so $! below is set only if a real error happens from now
+    eval 'local($^W) = 0; undef $!';
+				
+    while (1)
+    {
+	alarm($timeout) if $timeout;
+        $_ = <INPUT>;
+	alarm(0);
+	last if !defined($_);
+
+	## shove it out.
+	&www'clear_message if $need_to_clear; #'
+
+	print;
+	print SAVEOUT if $nab==2;
+
+	## if we know the content-size, keep track of what we're reading.
+	$bytesread += length;
+
+	last if eof || (defined $size2read && $bytesread >= $size2read);
+
+	if (!$quiet && $bytesread > ($lastcount + $delta2print))
+	{
+	    if ($time = time, $last_time == $time) {
+		$delta2print *= 1.5;
+	    } else {
+		$last_time = $time;
+		$lastcount = $bytesread;
+		local($time_delta) = $time - $start_time;
+		local($text);
+
+		$delta2print /= $time_delta;
+		if (defined $size2read) {
+		    $text = sprintf("read $bytesread bytes (%.0f%%)",
+				    $bytesread*100/$size2read);
+		} else {
+		    $text = "read $bytesread bytes";
+		}
+
+		if ($time_delta > 5 || ($time_delta && $bytesread > 10240))
+		{
+		    local($rate) = int($bytesread / $time_delta);
+		    if ($rate < 5000) {
+			$text .= " ($rate bytes/sec)";
+		    } elsif ($rate < 1024 * 10) {
+			$text .= sprintf(" (%.1f k/sec)", $rate/1024);
+		    } else {
+			$text .= sprintf(" (%.0f k/sec)", $rate/1024);
+		    }
+		}
+		&www'message(0, "$text..."); #'
+		$need_to_clear = -t STDOUT;
+	    }
+	}
+    }
+
+    if (!$quiet)
+    {
+	if ($size2read && ($size2read != $bytesread)) {
+	   &www'message(1, "WARNING: Expected $size2read bytes, read $bytesread bytes.\n"); #'
+	} else {
+	    &www'clear_message($text); #'
+        }
+    }
+}
+
+sub dummy {
+    1
+    || &dummy
+    || &fetch_via_ftp
+    || &fetch_via_http
+    || &http_alarm
+    || $www'useragent #'
+    || close(OUT)
+    || close(SAVEOUT);
+}
+
+
+
+## start of inline of image/www.pl
+######################################################################
+
+package main; sub package_image_www_pl_init {
+##
+## Jeffrey Friedl (jfriedl@omron.co.jp)
+## Copyri.... ah hell, just take it.
+##
+## This is "www.pl".
+## Include (require) to use, execute ("perl www.pl") to print a man page.
+## Requires my 'network.pl' library.
+package www;
+$version = "960604.17";
+
+## 960604.17
+## -- I'm a BONEHEAD. Was using only \n for the HTTP negotiations, not the
+##    \r\n that the HTTP spec clearly requires. This stopped some servers
+##    from talking to www.pl-using clients (such as webget). Many, many
+##    thanks to Daniel Dreilinger <dreiling@cs.colostate.edu> for pointing
+##    out the problem and providing a fix.
+##
+## 960528.16
+## -- No functional changes -- just added documentation on HTTP
+##    authorization (courtesy of William Maton <wmaton@enterprise.ic.gc.ca>)
+##
+## 960330.14
+## -- Removed all references to $`, $&, and %' to make $&-clean.
+##    (to trigger certain optimizations within perl)
+##
+## 960219.13
+## -- allowed the password part of a USER:PASS@HOST hostname to include '@',
+##    such as with
+##      ftp://anonymous:jfriedl@omron.co.jp@rtfm.mit.edu/.....
+##            ^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^
+##            account   password            host
+##
+## 960216.10
+## -- Wasn't always honoring non-default http port requests. Thanks to
+##    David Hull (http://pertsserver.cs.uiuc.edu/~hull/) for catching this.
+##
+## 951114.8
+## -- added support for HEAD, If-Modified-Since
+##
+## 951017.7
+## -- Change to allow a POST'ed HTTP text to have newlines in it.
+##    Added 'NewURL to the open_http_connection %info. Idea courtesy
+##    of Bryan Schmersal (http://www.transarc.com/~bryans/Home.html).
+##
+## 950921.6
+## -- added more robust HTTP error reporting
+##    (due to steven_campbell@uk.ibm.com)
+##
+## 950911.5
+## -- added Authorization support
+##
+
+##
+## HTTP return status codes.
+##
+%http_return_code =
+    (200,"OK",
+     201,"Created",
+     202,"Accepted",
+     203,"Partial Information",
+     204,"No Response",
+     301,"Moved",
+     302,"Found",
+     303,"Method",
+     304,"Not modified",
+     400,"Bad request",
+     401,"Unauthorized",
+     402,"Payment required",
+     403,"Forbidden",
+     404,"Not found",
+     500,"Internal error",
+     501,"Not implemented",
+     502,"Service temporarily overloaded",
+     503,"Gateway timeout");
+
+##
+## If executed directly as a program, print as a man page.
+##
+if (length($0) >= 6 && substr($0, -6) eq 'www.pl')
+{
+   seek(DATA, 0, 0) || die "$0: can't reset internal pointer.\n";
+   print "www.pl version $version\n", '=' x 60, "\n";
+   while (<DATA>) {
+	next unless /^##>/../^##</;   ## select lines to print
+	s/^##[<> ]?//;                ## clean up
+	print;
+   }
+   exit(0);
+}
+
+##
+## History:
+##   version 950425.4
+##      added require for "network.pl"
+##
+##   version 950425.3
+##      re-did from "Www.pl" which was a POS.
+##
+##
+## BLURB:
+##   A group of routines for dealing with URLs, HTTP sessions, proxies, etc.
+##   Requires my 'network.pl' package. The library file can be executed
+##   directly to produce a man page.
+
+##>
+## A motley group of routines for dealing with URLs, HTTP sessions, proxies,
+## etc. Requires my 'network.pl' package.
+##
+## Latest version, as well as other stuff (including network.pl) available
+## at http://www.wg.omron.co.jp/~jfriedl/perl/
+##
+## Simpleton complete program to dump a URL given on the command-line:
+##
+##    require 'network.pl';                             ## required for www.pl
+##    require 'www.pl';                                 ## main routines
+##    $URL = shift;                                     ## get URL
+##    ($status, $memo) = &www'open_http_url(*IN, $URL); ## connect
+##    die "$memo\n" if $status ne 'ok';                 ## report any error
+##    print while <IN>;                                 ## dump contents
+##
+## There are various options available for open_http_url.
+## For example, adding 'quiet' to the call, i.e.       vvvvvvv-----added
+##    ($status, $memo) = &www'open_http_url(*IN, $URL, 'quiet');
+## suppresses the normal informational messages such as "waiting for data...".
+##
+## HTTP authorization:
+##
+## If you wish to use HTTP authorization utilizing the method above, you
+## must first do the following (using the example from above):
+##
+##    local (@options)
+##    if (defined $password || defined $user) {
+##        local($auth) = join(':', ($user || ''), ($password || ''));
+##        push(@options, "authorization=$auth");
+##    }
+##    push(@options, 'quiet');
+##
+## Then you may do this:
+##
+##    ($status, $memo) = &www'open_http_url(*IN, $URL, @options);
+##
+## This ensures that the user/password info gets passed along with any
+## other options you may wish to specify.
+##
+## The options, as well as the various other public routines in the package,
+## are discussed below.
+##
+##<
+
+##
+## Default port for the protocols whose URL we'll at least try to recognize.
+##
+%default_port = ('http', 80,
+		 'ftp',  21,
+		 'gopher', 70,
+		 'telnet', 23,
+		 'wais', 210,
+		 );
+
+##
+## A "URL" to "ftp.blah.com" without a protocol specified is probably
+## best reached via ftp. If the hostname begins with a protocol name, it's
+## easy. But something like "www." maps to "http", so that mapping is below:
+##
+%name2protocol = (
+	'www',	 'http',
+	'wwwcgi','http',
+);
+
+$last_message_length = 0;
+$useragent = "www.pl/$version";
+
+##
+##>
+##############################################################################
+## routine: open_http_url
+##
+## Used as
+##  ($status, $memo, %info) = &www'open_http_url(*FILEHANDLE, $URL, options..)
+##
+## Given an unused filehandle, a URL, and a list of options, opens a socket
+## to the URL and returns with the filehandle ready to read the data of the
+## URL. The HTTP header, as well as other information, is returned in %info.
+##
+## OPTIONS are from among:
+##
+##   "post"
+##	If PATH appears to be a query (i.e. has a ? in it), contact
+##	via a POST rather than a GET.
+##
+##   "nofollow"
+##	Normally, if the initial contact indicates that the URL has moved
+##	to a different location, the new location is automatically contacted.
+##	"nofollow" inhibits this.
+##
+##   "noproxy"
+##	Normally, a proxy will be used if 'http_proxy' is defined in the
+##	environment. This option inhibits the use of a proxy.
+##
+##   "retry"
+##	If a host's address can't be found, it may well be because the
+##	nslookup just didn't return in time and that retrying the lookup
+##	after a few seconds will succeed. If this option is given, will
+##	wait five seconds and try again. May be given multiple times to
+##	retry multiple times.
+##
+##   "quiet"
+##	Informational messages will be suppressed.
+##
+##   "debug"
+##	Additional messages will be printed.
+##
+##   "head"
+##      Requests only the file header to be sent
+##
+##   "authorization"
+##      If authorized access is required, the user and password is passed
+##      as a colon deliminated pair, i.e., user:password.  See the code
+##      snippet in &www'open_http_url for an example.
+##
+##
+##
+##
+## The return array is ($STATUS, $MEMO, %INFO).
+##
+##    STATUS is 'ok', 'error', 'status', or 'follow'
+##
+##	If 'error', the MEMO will indicate why (URL was not http, can't
+##	connect, etc.). INFO is probably empty, but may have some data.
+##	See below.
+##
+##	If 'status', the connnection was made but the reply was not a normal
+##	"OK" successful reply (i.e. "Not found", etc.). MEMO is a note.
+##	INFO is filled as noted below. Filehandle is ready to read (unless
+##	$info{'BODY'} is filled -- see below), but probably most useful
+##	to treat this as an 'error' response.
+##
+##	If 'follow', MEMO is the new URL (for when 'nofollow' was used to
+##	turn off automatic following) and INFO is filled as described
+##	below.  Unless you wish to give special treatment to these types of
+##	responses, you can just treat 'follow' responses like 'ok'
+##	responses.
+##
+##	If 'ok', the connection went well and the filehandle is ready to
+##      read.
+##
+##   INFO contains data as described at the read_http_header() function (in
+##   short, the HTTP response header) and additional informational fields.
+##   In addition, the following fields are filled in which describe the raw
+##   connection made or attempted:
+##
+## 	PROTOCOL, HOST, PORT, PATH
+##
+##   Note that if a proxy is being used, these will describe the proxy.
+##   The field TARGET will describe the host or host:port ultimately being
+##   contacted. When no proxy is being used, this will be the same info as
+##   in the raw connection fields above. However, if a proxy is being used,
+##   it will refer to the final target.
+##
+##   In some cases, the additional entry $info{'BODY'} exists as well. If
+##   the result-code indicates an error, the body of the message may be
+##   parsed for internal reasons (i.e. to support 'repeat'), and if so, it
+##   will be saved in $info{'BODY}.
+##
+##   If the URL has moved, $info{'NewURL'} will exist and contain the new
+##   URL.  This will be true even if the 'nofollow' option is specified.
+##
+##<
+##
+sub open_http_url
+{
+    local(*HTTP, $URL, @options) = @_;
+    return &open_http_connection(*HTTP, $URL, undef, undef, undef, @options);
+}
+
+##
+##>
+##############################################################################
+## routine: read_http_header
+##
+## Given a filehandle to a just-opened HTTP socket connection (such as one
+## created via &network'connect_to which has had the HTTP request sent),
+## reads the HTTP header and and returns the parsed info.
+##
+##   ($replycode, %info) = &read_http_header(*FILEHANDLE);
+##
+## $replycode will be the HTTP reply code as described below, or
+## zero on header-read error.
+##
+## %info contains two types of fields:
+##
+##    Upper-case fields are informational from the function.
+##    Lower-case fields are the header field/value pairs.
+##
+##  Upper-case fields:
+##
+##     $info{'STATUS'} will be the first line read (HTTP status line)
+##
+##     $info{'CODE'} will be the numeric HTTP reply code from that line.
+##       This is also returned as $replycode.
+##
+##     $info{'TYPE'} is the text from the status line that follows CODE.
+##
+##     $info{'HEADER'} will be the raw text of the header (sans status line),
+##       newlines and all.
+##
+##     $info{'UNKNOWN'}, if defined, will be any header lines not in the
+##       field/value format used to fill the lower-case fields of %info.
+##
+##  Lower-case fields are reply-dependent, but in general are described
+##  in http://info.cern.ch/hypertext/WWW/Protocols/HTTP/Object_Headers.html
+##
+##  A header line such as
+##      Content-type: Text/Plain
+##  will appear as $info{'content-type'} = 'Text/Plain';
+##
+##  (*) Note that while the field names are are lower-cased, the field
+##      values are left as-is.
+##
+##
+## When $replycode is zero, there are two possibilities:
+##    $info{'TYPE'} is 'empty'
+##        No response was received from the filehandle before it was closed.
+##        No other %info fields present.
+##    $info{'TYPE'} is 'unknown'
+##        First line of the response doesn't seem to be proper HTTP.
+##        $info{'STATUS'} holds that line. No other %info fields present.
+##
+## The $replycode, when not zero, is as described at
+##        http://info.cern.ch/hypertext/WWW/Protocols/HTTP/HTRESP.html
+##
+## Some of the codes:
+##
+##   success 2xx
+##    ok 200
+##    created 201
+##    accepted 202
+##    partial information 203
+##    no response 204
+##   redirection 3xx
+##    moved 301
+##    found 302
+##    method 303
+##    not modified 304
+##   error 4xx, 5xx
+##    bad request 400
+##    unauthorized 401
+##    paymentrequired 402
+##    forbidden 403
+##    not found 404
+##    internal error 500
+##    not implemented 501
+##    service temporarily overloaded 502
+##    gateway timeout 503
+##
+##<
+##
+sub read_http_header
+{
+    local(*HTTP) = @_;
+    local(%info, $_);
+
+    ##
+    ## The first line of the response will be the status (OK, error, etc.)
+    ##
+    unless (defined($info{'STATUS'} = <HTTP>)) {
+	$info{'TYPE'} = "empty";
+        return (0, %info);
+    }
+    chop $info{'STATUS'};
+
+    ##
+    ## Check the status line. If it doesn't match and we don't know the
+    ## format, we'll just let it pass and hope for the best.
+    ##
+    unless ($info{'STATUS'} =~ m/^HTTP\S+\s+(\d\d\d)\s+(.*\S)/i) {
+	$info{'TYPE'} = 'unknown';
+        return (0, %info);
+    }
+
+    $info{'CODE'} = $1;
+    $info{'TYPE'} = $2;
+    $info{'HEADER'} = '';
+
+    ## read the rest of the header.
+    while (<HTTP>) {
+	last if m/^\s*$/;
+	$info{'HEADER'} .= $_; ## save whole text of header.
+
+	if (m/^([^\n:]+):[ \t]*(.*\S)/) {
+	    local($field, $value) = ("\L$1", $2);
+	    if (defined $info{$field}) {
+		$info{$field} .= "\n" . $value;
+	    } else {
+		$info{$field} = $value;
+	    }
+	} elsif (defined $info{'UNKNOWN'}) {
+	    $info{'UNKNOWN'} .= $_;
+	} else {
+	    $info{'UNKNOWN'} = $_;
+	}
+    }
+
+    return ($info{'CODE'}, %info);
+}
+
+##
+##>
+##
+##############################################################################
+## routine: grok_URL(URL, noproxy, defaultprotocol)
+##
+## Given a URL, returns access information. Deals with
+##	http, wais, gopher, ftp, and telnet
+## URLs.
+##
+## Information returned is
+##     (PROTOCOL, HOST, PORT, PATH, TARGET, USER, PASSWORD)
+##
+## If noproxy is not given (or false) and there is a proxy defined
+## for the given protocol (via the "*_proxy" environmental variable),
+## the returned access information will be for the proxy and will
+## reference the given URL. In this case, 'TARGET' will be the
+## HOST:PORT of the original URL (PORT elided if it's the default port).
+##
+## Access information returned:
+##   PROTOCOL: "http", "ftp", etc. (guaranteed to be lowercase).
+##   HOST: hostname or address as given.
+##   PORT: port to access
+##   PATH: path of resource on HOST:PORT.
+##   TARGET: (see above)
+##   USER and PASSWORD: for 'ftp' and 'telnet' URLs, if supplied by the
+##      URL these will be defined, undefined otherwise.
+##
+## If no protocol is defined via the URL, the defaultprotocol will be used
+## if given. Otherwise, the URL's address will be checked for a leading
+## protocol name (as with a leading "www.") and if found will be used.
+## Otherwise, the protocol defaults to http.
+##
+## Fills in the appropriate default port for the protocol if need be.
+##
+## A proxy is defined by a per-protocol environmental variable such
+## as http_proxy. For example, you might have
+##    setenv http_proxy http://firewall:8080/
+##    setenv ftp_proxy $http_proxy
+## to set it up.
+##
+## A URL seems to be officially described at
+##    http://www.w3.org/hypertext/WWW/Addressing/URL/5_BNF.html
+## although that document is a joke of errors.
+##
+##<
+##
+sub grok_URL
+{
+    local($_, $noproxy, $defaultprotocol) = @_;
+    $noproxy = defined($noproxy) && $noproxy;
+
+    ## Items to be filled in and returned.
+    local($protocol, $address, $port, $path, $target, $user, $password);
+
+    return undef unless m%^(([a-zA-Z]+)://|/*)([^/]+)(/.*)?$%;
+
+    ##
+    ## Due to a bug in some versions of perl5, $2 might not be empty
+    ## even if $1 is. Therefore, we must check $1 for a : to see if the
+    ## protocol stuff matched or not. If not, the protocol is undefined.
+    ##
+    ($protocol, $address, $path) = ((index($1,":") >= 0 ? $2 : undef), $3, $4);
+
+    if (!defined $protocol)
+    {
+	##
+        ## Choose a default protocol if none given. If address begins with
+	## a protocol name (one that we know via %name2protocol or
+	## %default_port), choose it. Otherwise, choose http.
+	##
+	if (defined $defaultprotocol)	{
+	    $protocol = $defaultprotocol;
+	}
+	else
+	{
+	    $address =~ m/^([a-zA-Z]+)/;
+	    if (defined($name2protocol{"\L$1"})) {
+		$protocol = $name2protocol{"\L$1"};
+	    } else {
+		$protocol = defined($default_port{"\L$1"}) ? $1 : 'http';
+	    }
+        }
+    }
+    $protocol =~ tr/A-Z/a-z/; ## ensure lower-case.
+
+    ##
+    ## Http support here probably not kosher, but fits in nice for basic
+    ## authorization.
+    ##
+    if ($protocol eq 'ftp' || $protocol eq 'telnet' || $protocol eq 'http')
+    {
+        ## Glean a username and password from address, if there.
+        ## There if address starts with USER[:PASSWORD]@
+	## The USER part can have no : or @, but the password may.
+	## I.e. the following is valid:
+	##      anonymous:jfriedl@omron.co.jp@rtfm.mit.edu
+	##      ^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^
+	##      account   password            host
+	##
+        ## You may also enclose the password in quotes for readablity:
+	##      anonymous:"jfriedl@omron.co.jp"@rtfm.mit.edu
+	## This is not the URL standard, though.
+	##
+	if ($address =~ s/^(([^\@:]+)(:(".*"|.*))?\@)//) {
+	    ($user, $password) = ($2, $4);
+	    $password = $1 if $password =~ m/^"(.*)"$/;
+	}
+    }
+
+    ##
+    ## address left is (HOSTNAME|HOSTNUM)[:PORTNUM]
+    ##
+    if ($address =~ s/:(\d+)$//) {
+       $port = $1;
+    } else {
+       $port = $default_port{$protocol};
+    }
+
+    ## default path is '/';
+    $path = '/' if !defined $path;
+
+    ##
+    ## If there's a proxy and we're to proxy this request, do so.
+    ##
+    local($proxy) = $ENV{$protocol."_proxy"};
+    if (!$noproxy && defined($proxy) && !&no_proxy($protocol,$address))
+    {
+	local($dummy);
+	local($old_pass, $old_user);
+
+	##
+	## Since we're going through a proxy, we want to send the
+	## proxy the entire URL that we want. However, when we're
+	## doing Authenticated HTTP, we need to take out the user:password
+	## that webget has encoded in the URL (this is a bit sleazy on
+	## the part of webget, but the alternative is to have flags, and
+	## having them part of the URL like with FTP, etc., seems a bit
+	## cleaner to me in the context of how webget is used).
+	##
+	## So, if we're doing this slezy thing, we need to construct
+	## the new URL from the compnents we have now (leaving out password
+	## and user), decode the proxy URL, then return the info for
+	## that host, a "filename" of the entire URL we really want, and
+	## the user/password from the original URL.
+	##
+	## For all other things, we can just take the original URL,
+	## ensure it has a protocol on it, and pass it as the "filename"
+	## we want to the proxy host. The difference between reconstructing
+	## the URL (as for HTTP Authentication) and just ensuring the
+	## protocol is there is, except for the user/password stuff,
+	## nothing. In theory, at least.
+	##
+        if ($protocol eq 'http' && (defined($password) || defined($user)))
+	{
+	    $path = "http://$address$path";
+	    $old_pass = $password;
+	    $old_user = $user;
+	} else {
+	    ## Re-get original URL and ensure protocol// actually there.
+	    ## This will become our new path.
+	    ($path = $_) =~ s,^($protocol:)?/*,$protocol://,i;
+        }
+
+	## note what the target will be
+	$target = ($port==$default_port{$protocol})?$address:"$address:$port";
+
+	## get proxy info, discarding
+        ($protocol, $address, $port, $dummy, $dummy, $user, $password)
+	    = &grok_URL($proxy, 1);
+        $password = $old_pass if defined $old_pass;
+        $user     = $old_user if defined $old_user;
+    }
+    ($protocol, $address, $port, $path, $target, $user, $password);
+}
+
+##
+## &no_proxy($protocol, $host)
+##
+## Returns true if the specified host is identified in the no_proxy
+## environmental variable, or identify the proxy server itself.
+##
+sub no_proxy
+{
+    local($protocol, $targethost) = @_;
+    local(@dests, $dest, $host, @hosts, $aliases);
+    local($proxy) = $ENV{$protocol."_proxy"};
+    return 0 if !defined $proxy;
+    $targethost =~ tr/A-Z/a-z/; ## ensure all lowercase;
+
+    @dests = ($proxy);
+    push(@dests,split(/\s*,\s*/,$ENV{'no_proxy'})) if defined $ENV{'no_proxy'};
+
+    foreach $dest (@dests)
+    {
+	## just get the hostname
+	$host = (&grok_URL($dest, 1), 'http')[1];
+
+	if (!defined $host) {
+	    warn "can't grok [$dest] from no_proxy env.var.\n";
+	    next;
+	}
+	@hosts = ($host); ## throw in original name just to make sure
+	($host, $aliases) = (gethostbyname($host))[0, 1];
+
+	if (defined $aliases) {
+	    push(@hosts, ($host, split(/\s+/, $aliases)));
+	} else {
+	    push(@hosts, $host);
+	}
+	foreach $host (@hosts) {
+	    next if !defined $host;
+	    return 1 if "\L$host" eq $targethost;
+	}
+    }
+    return 0;
+}
+
+sub ensure_proper_network_library
+{
+   require 'network.pl' if !defined $network'version; #'
+   warn "WARNING:\n". __FILE__ .
+        qq/ needs a newer version of "network.pl"\n/ if
+     !defined($network'version) || $network'version < "950311.5";
+}
+
+##
+##>
+##############################################################################
+## open_http_connection(*FILEHANDLE, HOST, PORT, PATH, TARGET, OPTIONS...)
+##
+## Opens an HTTP connection to HOST:PORT and requests PATH.
+## TARGET is used only for informational messages to the user.
+##
+## If PORT and PATH are undefined, HOST is taken as an http URL and TARGET
+## is filled in as needed.
+##
+## Otherwise, it's the same as open_http_url (including return value, etc.).
+##<
+##
+sub open_http_connection
+{
+    local(*HTTP, $host, $port, $path, $target, @options) = @_;
+    local($post_text, @error, %seen);
+    local(%info);
+
+    &ensure_proper_network_library;
+
+    ## options allowed:
+    local($post, $retry, $authorization,  $nofollow, $noproxy,
+	  $head, $debug, $ifmodifiedsince, $quiet,              ) = (0) x 10;
+    ## parse options:
+    foreach $opt (@options)
+    {
+	next unless defined($opt) && $opt ne '';
+	local($var, $val);
+	if ($opt =~ m/^(\w+)=(.*)/) {
+	    ($var, $val) = ($1, $2);
+	} else {
+	    $var = $opt;
+	    $val = 1;
+	}
+	$var =~ tr/A-Z/a-z/; ## ensure variable is lowercase.
+	local(@error);
+
+	eval "if (defined \$$var) { \$$var = \$val; } else { \@error =
+              ('error', 'bad open_http_connection option [$opt]'); }";
+        return ('error', "open_http_connection eval: $@") if $@;
+	return @error if defined @error;
+    }
+    $quiet = 0 if $debug;  ## debug overrides quiet
+
+    local($protocol, $error, $code, $URL, %info, $tmp, $aite);
+
+    ##
+    ## if both PORT and PATH are undefined, treat HOST as a URL.
+    ##
+    unless (defined($port) && defined($path))
+    {
+        ($protocol,$host,$port,$path,$target)=&grok_URL($host,$noproxy,'http');
+	if ($protocol ne "http") {
+	    return ('error',"open_http_connection doesn't grok [$protocol]");
+	}
+	unless (defined($host)) {
+	    return ('error', "can't grok [$URL]");
+	}
+    }
+
+    return ('error', "no port in URL [$URL]") unless defined $port;
+    return ('error', "no path in URL [$URL]") unless defined $path;
+
+    RETRY: while(1)
+    {
+	## we'll want $URL around for error messages and such.
+	if ($port == $default_port{'http'}) {
+	    $URL = "http://$host";
+	} else {
+	    $URL = "http://$host:$port";
+	}
+        $URL .= ord($path) eq ord('/') ? $path : "/$path";
+
+	$aite = defined($target) ? "$target via $host" : $host;
+
+	&message($debug, "connecting to $aite ...") unless $quiet;
+
+	##
+        ## note some info that might be of use to the caller.
+	##
+        local(%preinfo) = (
+	    'PROTOCOL', 'http',
+	    'HOST', $host,
+	    'PORT', $port,
+	    'PATH', $path,
+        );
+	if (defined $target) {
+	    $preinfo{'TARGET'} = $target;
+	} elsif ($default_port{'http'} == $port) {
+	    $preinfo{'TARGET'} = $host;
+	} else {
+	    $preinfo{'TARGET'} = "$host:$port";
+	}
+
+	## connect to the site
+	$error = &network'connect_to(*HTTP, $host, $port); #'
+
+	if (defined $error) {
+	    return('error', "can't connect to $aite: $error", %preinfo);
+	}
+
+	## If we're asked to POST and it looks like a POST, note post text.
+	if ($post && $path =~ m/^([^?]+)\?(.*)/) {
+	    $path = $1;      ## everything before the '?'
+	    $post_text = $2; ## everything after the '?'
+        }
+
+	## send the POST or GET request
+	$tmp = $head ? 'HEAD' : (defined $post_text ? 'POST' : 'GET');
+
+	&message($debug, "sending request to $aite ...") if !$quiet;
+	print HTTP $tmp, " $path HTTP/1.0\r\n";
+
+	## send the If-Modified-Since field if needed.
+	if ($ifmodifiedsince) {
+	    print HTTP "If-Modified-Since: $ifmodifiedsince\r\n";
+	}
+
+	## oh, let's sputter a few platitudes.....
+
+	print HTTP "Accept: image/gif, image/x-xbitmap, image/jpeg, image/pjpeg, */*\r\n";
+	print HTTP "User-Agent: $useragent\r\n" if defined $useragent;
+
+        ## If doing Authorization, do so now.
+        if ($authorization) {
+	    print HTTP "Authorization: Basic ",
+	        &htuu_encode($authorization), "\r\n";
+	}
+
+	## If it's a post, send it.
+	if (defined $post_text)
+	{
+	    print HTTP "Content-type: application/x-www-form-urlencoded\r\n";
+	    print HTTP "Content-length: ", length $post_text, "\r\n\r\n";
+	    $post_text =~ s/\r?\n/\r\n/g; ## ensure \r\n for each line
+	    print HTTP $post_text, "\r\n";
+	}
+	print HTTP "\r\n";
+	&message($debug, "waiting for data from $aite ...") unless $quiet;
+
+	## we can now read the response (header, then body) via HTTP.
+	binmode(HTTP); ## just in case.
+
+	($code, %info) = &read_http_header(*HTTP);
+	&message(1, "header returns code $code ($info{'TYPE'})") if $debug;
+
+	## fill in info from %preinfo
+	local($val, $key);
+	while (($val, $key) = each %preinfo) {
+	    $info{$val} = $key;
+	}
+
+	if ($code == 0)
+	{
+	    return('error',"empty response for $URL")
+		if $info{'TYPE'} eq 'empty';
+	    return('error', "non-HTTP response for $URL", %info)
+		if $info{'TYPE'} eq 'unknown';
+	    return('error', "unknown zero-code for $URL", %info);
+	}
+
+	if ($code == 302) ## 302 is magic for "Found"
+	{
+	    if (!defined $info{'location'}) {
+		return('error', "No location info for Found URL $URL", %info);
+	    }
+	    local($newURL) = $info{'location'};
+
+	    ## Remove :80 from hostname, if there. Looks ugly.
+	    $newURL =~ s,^(http:/+[^/:]+):80/,$1/,i;
+	    $info{"NewURL"} = $newURL;
+
+	    ## if we're not following links or if it's not to HTTP, return.
+	    return('follow', $newURL, %info) if
+		$nofollow || $newURL!~m/^http:/i;
+
+	    ## note that we've seen this current URL.
+	    $seen{$host, $port, $path} = 1;
+
+	    &message(1, qq/[note: now moved to "$newURL"]/) unless $quiet;
+
+	    ## get the new one and return an error if it's been seen.
+	    ($protocol, $host, $port, $path, $target) =
+		&www'grok_URL($newURL, $noproxy); #'
+
+	    &message(1, "[$protocol][$host][$port][$path]") if $debug;
+
+	    if (defined $seen{$host, $port, $path})
+	    {
+		return('error', "circular reference among:\n    ".
+		       join("\n    ", sort grep(/^http/i, keys %seen)), %seen);
+	    }
+	    next RETRY;
+	}
+	elsif ($code == 500) ## 500 is magic for "internal error"
+	{
+	    ##
+	    ## A proxy will often return this with text saying "can't find
+	    ## host" when in reality it's just because the nslookup returned
+	    ## null at the time. Such a thing should be retied again after a
+	    ## few seconds.
+	    ##
+	    if ($retry)
+	    {
+		local($_) = $info{'BODY'} = join('', <HTTP>);
+		if (/Can\'t locate remote host:\s*(\S+)/i) {
+		    local($times) = ($retry == 1) ?
+			"once more" : "up to $retry more times";
+		    &message(0, "can't locate $1, will try $times ...")
+			unless $quiet;
+		    sleep(5);
+		    $retry--;
+		    next RETRY;
+		}
+	    }
+	}
+	if ($code != 200)  ## 200 is magic for "OK";
+	{
+	    ## I'll deal with these as I see them.....
+	    &clear_message;
+	    if ($info{'TYPE'} eq '')
+	    {
+		if (defined $http_return_code{$code}) {
+		    $info{'TYPE'} = $http_return_code{$code};
+		} else {
+		    $info{'TYPE'} = "(unknown status code $code)";
+		}
+	    }
+	    return (($code >= 500 ? 'error' : 'status'), ## 500+ is real error
+		    $info{'TYPE'},
+		    %info);
+	}
+
+        &clear_message;
+	return ('ok', 'ok', %info);
+    }
+}
+
+##
+## Hyper Text UUencode. Somewhat different from regular uuencode.
+##
+## Logic taken from Mosaic for X code by Mark Riordan and Ari Luotonen.
+##
+sub htuu_encode
+{
+    local(@in) = unpack("C*", $_[0]);
+    local(@out);
+
+    push(@in, 0, 0); ## in case we need to round off an odd byte or two
+    while (@in >= 3) {
+	##
+        ## From the next three input bytes,
+	## construct four encoded output bytes.
+	##
+	push(@out, $in[0] >> 2);
+	push(@out, (($in[0] << 4) & 060) | (($in[1] >> 4) & 017));
+        push(@out, (($in[1] << 2) & 074) | (($in[2] >> 6) & 003));
+        push(@out,   $in[2]       & 077);
+	splice(@in, 0, 3); ## remove these three
+    }
+
+    ##
+    ## @out elements are now indices to the string below. Convert to
+    ## the appropriate actual text.
+    ##
+    foreach $new (@out) {
+	$new = substr(
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+          $new, 1);
+    }
+
+    if (@in == 2) {
+	## the two left over are the two extra nulls, so we encoded the proper
+        ## amount as-is.
+    } elsif (@in == 1) {
+	## We encoded one extra null too many. Undo it.
+	$out[$#out] = '=';
+    } else {
+        ## We must have encoded two nulls... Undo both.
+	$out[$#out   ] = '=';
+	$out[$#out -1] = '=';
+    }
+
+    join('', @out);
+}
+
+##
+## This message stuff really shouldn't be here, but in some seperate library.
+## Sorry.
+##
+## Called as &message(SAVE, TEXT ....), it shoves the text to the screen.
+## If SAVE is true, bumps the text out as a printed line. Otherwise,
+## will shove out without a newline so that the next message overwrites it,
+## or it is clearded via &clear_message().
+##
+sub message
+{
+    local($nl) = shift;
+    die "oops $nl." unless $nl =~ m/^\d+$/;
+    local($text) = join('', @_);
+    local($NL) = $nl ? "\n" : "\r";
+    $thislength = length($text);
+    if ($thislength >= $last_message_length) {
+	print STDERR $text, $NL;
+    } else {
+	print STDERR $text, ' 'x ($last_message_length-$thislength), $NL;
+    }
+    $last_message_length = $nl ? 0 : $thislength;
+}
+
+sub clear_message
+{
+    if ($last_message_length) {
+	print STDERR ' ' x $last_message_length, "\r";
+	$last_message_length = 0;
+    }
+}
+
+1;
+
+
+} # end of inline of image/www.pl
+
+## start of inline of image/network.pl
+######################################################################
+
+package main; sub package_image_network_pl_init {
+##
+## Jeffrey Friedl (jfriedl@omron.co.jp)
+## Copyri.... ah hell, just take it.
+##
+## July 1994
+##
+package network;
+$version = "960514.7";
+## version 960514.7 -- relaxed the check on nslookup's output. Thanks to
+##                     Martin Moessel <mm@sybase.com> for helpful feedback.
+## version 960206.6 -- have connect_to use 'localhost' if the real host bind
+##                     doesn't work (as it doesn't seem to want to under linux)
+## version 950311.5 -- turned off warnings when requiring 'socket.ph';
+## version 941028.4 -- some changes to quiet perl5 warnings.
+## version 940826.3 -- added check for "socket.ph", and alternate use of
+## socket STREAM value for SunOS5.x
+##
+
+## BLURB:
+## A few simple and easy-to-use routines to make internet connections. 
+## Similar to "chat2.pl" (but actually commented, and a bit more portable).
+## Should work even on SunOS5.x.
+##
+
+##>
+##
+## connect_to() -- make an internet connection to a server.
+##
+## Two uses:
+##	$error = &network'connect_to(*FILEHANDLE, $fromsockaddr, $tosockaddr)
+##      $error = &network'connect_to(*FILEHANDLE, $hostname, $portnum)
+##
+## Makes the given connection and returns an error string, or undef if
+## no error.
+##
+## In the first form, FROMSOCKADDR and TOSOCKADDR are of the form returned
+## by SOCKET'GET_ADDR and SOCKET'MY_ADDR.
+##
+##<
+sub connect_to
+{
+    local(*FD, $arg1, $arg2) = @_;
+    local($from, $to)   = ($arg1, $arg2); ## for one interpretation.
+    local($host, $port) = ($arg1, $arg2); ## for the other
+    local(@from);
+
+    if (defined($to) && length($from)==16 && length($to)==16) {
+	@from = ($from);
+	## ok just as is
+    } elsif (defined $host) {
+	$to = &get_addr($host, $port);
+	return qq/unknown address "$host"/ unless defined $to;
+	@from = ($ENV{'NetworkHost'}, &my_addr, $ENV{'HOST'}, 'localhost');
+    } else {
+	return "unknown arguments to network'connect_to";
+    }
+
+    return "connect_to failed (socket: $!)"  unless &my_inet_socket(*FD);
+    local($bind_ok) = 0;
+    foreach $from (@from) {
+	next if !defined $from;
+	$from = &ifconfig($1) if $from =~ m/^ifconfig:\s*(.*)/;
+	$from = &get_addr($from, 0) if length($from) != 16;
+	$bind_ok = 1, last if bind(FD, $from);
+    }
+    return "connect_to failed (bind: $!)" unless $bind_ok;
+    return "connect_to failed (connect: $!)" unless connect(FD, $to);
+    local($old) = select(FD); $| = 1; select($old);
+    undef;
+}
+
+##
+## Run ifconfig and try to nab the local IP address from it.  If there's an
+## arg (and it's not "any" -- usually eth0 or ppp0, probably), only that
+## interface will be checked.
+##
+## In all cases, any 'lo' (loopback) interface is ignored, even if you
+## ask for it.
+##
+sub ifconfig
+{
+    local($arg) = @_;
+    $arg = '' if (!$arg) || ($arg eq 'any');
+    return $ifconfig{$arg} if defined $ifconfig{$arg}; ## check local cache
+    local($/) = '';
+    foreach (grep(!/^lo/ && /\bRUNNING\b/ && /\bUP\b/, `ifconfig $arg`)) {
+	return ($ifconfig{$arg} = $1) if /addr:([\d.]+)/;
+    }
+    undef;
+}
+
+##>
+##
+## listen_at() - used by a server to indicate that it will accept requests
+##               at the port number given.
+##
+## Used as
+##	$error = &network'listen_at(*LISTEN, $portnumber);
+## (returns undef upon success)
+##
+## You can then do something like
+##     $addr = accept(REMOTE, LISTEN);
+##     print "contact from ", &network'addr_to_ascii($addr), ".\n";
+##     while (<REMOTE>) {
+##        .... process request....
+##     }
+##     close(REMOTE);
+##
+##<
+sub listen_at
+{
+    local(*FD, $port) = @_;
+    local($empty) = pack('S n a4 x8', 2 ,$port, "\0\0\0\0");
+    return "listen_for failed (socket: $!)"  unless &my_inet_socket(*FD);
+    return "listen_for failed (bind: $!)"    unless bind(FD, $empty);
+    return "listen_for failed (listen: $!)"  unless listen(FD, 5);
+    local($old) = select(FD); $| = 1; select($old);
+    undef;
+}
+
+##>
+##
+## Given an internal packed internet address (as returned by &connect_to
+## or &get_addr), return a printable ``1.2.3.4'' version.
+##
+##<
+sub addr_to_ascii
+{
+    local($addr) = @_;
+    return "bad arg" if length $addr != 16;
+    return join('.', unpack("CCCC", (unpack('S n a4 x8', $addr))[2]));
+}
+
+##
+## 
+## Given a host and a port name, returns the packed socket addresss.
+## Mostly for internal use.
+##
+##
+sub get_addr
+{
+    local($host, $port) = @_;
+    return $addr{$host,$port} if defined $addr{$host,$port};
+    local($addr);
+
+    if ($host =~ m/^\d+\.\d+\.\d+\.\d+$/) {
+	$addr = pack("C4", split(/\./, $host));
+    } elsif ($addr = (gethostbyname($host))[4], !defined $addr) {
+        local(@lookup) = `nslookup $host 2>&1`;
+	if (@lookup)
+	{
+	    local($lookup) = join('', @lookup[2 .. $#lookup]);
+	    if ($lookup =~ m/Address:\s*(\d+\.\d+\.\d+\.\d+)/) {
+	        $addr = pack("C4", split(/\./, $1));
+	    }
+	}
+	if (!defined $addr) {
+	    ## warn "$host: SOL, dude\n";
+	    return undef;
+	}
+    }
+    $addr{$host,$port} = pack('S n a4 x8', 2, $port, $addr);
+}
+
+##
+## my_addr()
+## Returns the packed socket address of the local host (port 0)
+## Mostly for internal use.
+##
+##
+sub my_addr
+{
+    return $addr{'me'} if defined $addr{'me'};
+    chop($_myhostname_ = `hostname`) if !defined $_myhostname_;
+
+    $addr{'me'} = &get_addr($_myhostname_, 0);
+}
+
+##
+## my_inet_socket(*FD);
+##
+## Local routine to do socket(PF_INET, SOCK_STREAM, AF_NS).
+## Takes care of figuring out the proper values for the args. Hopefully.
+##
+## Returns the same value as 'socket'.
+##
+sub my_inet_socket
+{
+    local(*FD) = @_;
+    local($socket);
+
+    if (!defined $socket_values_queried)
+    {
+	## try to load some "socket.ph"
+	if (!defined &main'_SYS_SOCKET_H_) {
+	  eval 'package main;
+	        local($^W) = 0;
+                require("sys/socket.ph")||require("socket.ph");';
+	}
+
+	## we'll use "the regular defaults" if for PF_INET and AF_NS if unknown
+	$PF_INET     = defined &main'PF_INET ? &main'PF_INET : 2;
+	$AF_NS       = defined &main'AF_NS   ? &main'AF_NS   : 6;
+	$SOCK_STREAM = &main'SOCK_STREAM if defined &main'SOCK_STREAM;
+
+	$socket_values_queried = 1;
+    }
+
+    if (defined $SOCK_STREAM) {
+	$socket = socket(FD, $PF_INET, $SOCK_STREAM, $AF_NS);
+    } else {
+	##
+	## We'll try the "regular default" of 1. If that returns a
+	## "not supported" error, we'll try 2, which SunOS5.x uses.
+	##
+	$socket = socket(FD, $PF_INET, 1, $AF_NS);
+	if ($socket) {
+	    $SOCK_STREAM = 1; ## got it.
+	} elsif ($! =~ m/not supported/i) {
+	    ## we'll just assume from now on that it's 2.
+	    $socket = socket(FD, $PF_INET, $SOCK_STREAM = 2, $AF_NS);
+	}
+    }
+    $socket;
+}
+
+## This here just to quiet -w warnings.
+sub dummy {
+  1 || $version || &dummy;
+}
+
+1;
+
+
+} # end of inline of image/network.pl
+
+__END__
+
+

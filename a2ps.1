@@ -1,0 +1,433 @@
+.ll +15
+.TH A2PS 1 "26 September 1991" "Version jf1.0"
+.SH NAME
+a2ps \-- ASCII to PostScript filter
+.SH SYNOPSIS
+a2ps [ options ] [ text files ...]
+.SH DESCRIPTION
+.I A2ps
+is a filter that converts simple text into pretty PostScript output.
+The given text files (or the default standard input) are accepted
+as input, and converted to PostScript code that will print the text
+with various embellished formating features. Page headers generally
+report the date, page number, total pages in the printout, and a title.
+Unlike other versions of
+.I a2ps
+this version can handle
+.I nroff
+output.
+.I A2ps
+is written in
+.IR Perl .
+.SH OPTIONS
+There are an unbelievable number of options.  The most common
+options are among the following (options noted in ALL CAPS are
+the default options):
+.TP
+.B "-1 / -2 / -w"
+Print one or TWO logical pages per sheet, or one wide page per sheet.
+With the default
+.BR \-2 ,
+two logical pages are printed side-by-side in landscape format on
+each physical sheet.  With
+.BR \-1 ,
+one page per sheet is printed, in portrait format. With
+.BR -w ,
+one page per sheet is printed in wide landscape mode (this increases
+the default number of characters per line).
+
+.TP
+.B "-n / -nn"
+Do / DON'T print line numbers, as in ``cat -n''.
+
+.TP
+\fB-draft\fP \fI[string]\fP / \fB-ndraft\fP
+Do / DON'T print the word ``draft'' lightly across each page.
+If the optional string is also given, that is printed rather
+than the word ``draft''.
+
+.TP
+.B "-bn / -nbn"
+Do / DON'T print a large page number lightly filling most of
+each sheet.
+
+.TP
+.B "-c / -nc"
+Do / DON'T chop (truncate) lines that are too long to fit within the width of
+the page.  By default, long lines are folded.  For compatibility
+with other versions of
+.IR a2ps ,
+the options
+.B -nf
+and
+.B -f
+are synonyms for
+.B -c
+and
+.B -nc
+respectively.
+
+.TP
+.B "-fl / -fr"
+Of significance only when folding lines, flushes the folded portion
+of the line to the left / RIGHT margin.  Although it might seem odd
+to flush to the right margin, it looks very nice.
+
+.TP
+.B "-mark / -nmark"
+Do / DON'T place a non-text marker symbol at the end of each line
+(to show the end-of-line).  EOL, folded, and chopped (truncated) lines all
+get different markers. By default, only chopped lines get markers.
+This option implies other options, namely:
+.BR -fl
+and
+.BR -nstrip .
+To reverse this default behavior, follow the
+.B -mark
+with a subsequent reversal of the implied one.
+
+.TP
+\fB-cl\fP \fIchars\fP / \fB-lp\fP \fIlines\fP
+Sets the characters-per-line and lines-per-page. Default values
+are 85 and 75.
+
+.TP
+\fB-T\fP \fI[string]\fP / \fB-nT\fP
+DO / don't show a title on each page. By default, the title is the name
+of the file (or no title if the input is the standard input).
+If an argument is given to
+.BR -T ,
+that string is used as the title.
+
+.TP
+.B "-init / -ninit"
+By default, the environmental variable
+.IR A2PS_INIT ,
+if set, it is parsed for
+.I a2ps
+options. This is done before command-line arguments and thus command-line
+arguments can always undo any options set via
+.IR A2PS_INIT .
+However, if the command-line argument
+.B -ninit
+is given,
+.I A2PS_INIT
+is not used.
+If the command-line argument
+.B -init
+is given,
+.I A2PS_INIT
+is used, and options is specifies are printed to standard error (and then
+.I a2ps
+continues about its business).
+For those that like to spend their time pondering such things,
+these options are meaningless but harmless if specified in
+.I A2PS_INIT
+itself.
+
+.TP
+\fB-squish\fP \fInum\fP / \fB-nsquish\fP
+Normally, lines that are longer than the number of set characters/line
+(as given by the
+.B -cl
+option) are either chopped or folded
+(as indicated by the
+.B -c
+option).  If
+.B -squish
+is given and
+.I num
+is longer than the set number of characters/line, lines longer than
+that but shorter than
+.I num
+(or as short) are printed in a smaller typeface to fit without folding
+or chopping.
+
+For example, consider a file where all but a few lines have less
+than 80 characters/line, and those few lines have no more than 100
+characters/line.  Giving the options
+.B "-cl 80 -squish 100"
+will cause all lines to be printed without being chopped or folded,
+but in a generally larger typeface than the simple
+.B "-cl 100"
+would result in.
+
+
+
+
+
+
+
+.SH "LITTLE-USED OPTIONS"
+The following options are most likely not used often.
+Still, they're here if you need them.
+
+.TP
+.B "-v / -nv"
+DO / don't print a'la ``cat -v''.
+Normally,
+.I a2ps
+will convert non-printing characters to visible control sequences
+such as ``^A''.  The option
+.B -nv
+will suppress this, and pass non-printing characters through unchanged.
+Note that backspace, formfeed, and tab are ``special'' and are
+under the control of
+.BR "-i / -ni" .
+
+.TP
+.BI "-ptm " len
+Sets the physical page top margin to the given length. No mark will be made
+on the page within the given distance from the top of the page.
+The number
+.I len
+is taken to be inches, unless it is appended with `c' (or `cm') for
+centimeters, or `p' (or `pt', `pts', or `ps') for raw point values.
+
+To change the other physical page margins, use
+.B -pbm
+for the bottom,
+.B -plm
+for the left,
+.B -prm
+for the right,
+and
+.B -pcm
+for the center margin (the space between two logical pages when two are
+printed on the same physical sheet).
+
+.TP
+.BI "-ltm " len
+Like
+.B -ptm
+above, but specifies the top margin for the text within each logical page.
+For setting the other logical page margins,
+.BR -pbm ,
+.BR -plm ,
+and
+.B -prm
+are also available.
+
+.TP
+.BI "-i / -ni"
+DO / don't give special interpretation to backspace, formfeed,
+and the tab characters.  By default, they are interpreted as they
+usually are (tab means ``advance to the next tab stop'',  etc.).
+If
+.B -ni
+is given, these characters fall under the influence of
+.B -v
+and
+.BR -nv .
+
+.TP
+\fB-sw\fP \fIlen\fP  /  \fB-sh\fP \fIlen\fP
+Sets the sheet width (\fB-sw\fP) and sheet height (\fB-sh\fP) of
+the paper on which to be printed.  All other measurements (such
+as margins, etc.) stem from these values.  The
+.I len
+argument is interpreted as with
+.B -ptm
+above.
+
+Two shortcuts to
+.B -sw
+and
+.B -sh
+are
+.B -usa
+which specifies 8.5" x 11", and
+.B -a4
+which specifies the ISO A4 standard.
+People that use A4 paper regularly can put this argument in their
+.I A2PS_INIT
+environmental variable.
+
+.TP
+.B "-lport / -lland / -ldef"
+Normally, the layout of the page (portrait or landscape) is dependent
+upon the number of pages printed per sheet (portrait for one and landscape
+for two, except for the
+.B -w
+wide-landscape format). The options
+.B -lport
+and
+.B -lland
+force portrait and landscape formats, while
+.B -ldef
+reverts back to the default layout.
+
+For printing files with short lines (columns of data, for example),
+try ``-cl ## -2 -lport'' with the `##' an appropriate number of
+characters/line.
+
+.TP
+.B "-r / -nr"
+Do / DON'T renumber physical sheets on a per-file basis.
+Normally, the physical sheet number (which is distinct from the
+logical page number) is not reset when a new file is begun
+in a multiple-file print (while the logical page number is
+always reset on a per-file basis).  The option
+.B -r
+causes the sheet numbering to start again at `1'.
+
+.TP
+.B "-seg / -nseg / -defseg"
+In a multiple-file print job printing with two logical pages
+per physical sheet, a decision must be made on what to do
+with the leftover logical page when printing of one file ends
+on the first logical page of a physical sheet. By default,
+the leftover logical page is used as the first page of the
+next file
+.I if
+physical sheets are
+.I not
+being renumbered on a per-file basis.  If they are (if
+.B -r
+has been specified), the leftover logical page is left blank
+and a new sheet is kicked out.
+
+The option
+.B -seg
+forces segregation of files (i.e. any leftover logical page will
+be left blank), while
+.B -nseg
+forces files to be not segregated.  The option
+.B -defseg
+represents the default operation.
+
+.TP
+.B "-box / -nbox"
+DO / don't put a box around each logical page.
+For compatibility with other versions of
+.IR a2ps ,
+the options
+.B -ns
+and
+.B -s
+are equivalent.
+
+.TP
+.B "-h / -nh"
+DO / don't print the logical page header. This header
+includes the title, date, and page number (each of which
+can be selectively omitted via other options if the header
+itself is printed.
+
+.TP
+.B "-t# | -t #"
+Sets the tab stops to be every `#' characters (default 8).
+
+.TP
+.B "-sn / -nsn"
+DO / don't number physical sheets.
+
+.TP
+.B "-pn / -npn"
+DO / don't show the logical page number in the logical page header.
+
+.TP
+.B "-d / -nd"
+DO / don't show the printing date and time in the logical page header.
+
+.TP
+.B "-stbl / -nstbl / -stb / -nstb"
+Normally,
+.I a2ps
+strips trailing blanks from each line, and trailing blank lines from each
+file. As a whole, this can be turned on and off by
+.B -strip
+and
+.BR -nstrip .
+For more selectivity,
+.B "-stbl / -nstbl"
+will/won't strip trailing blank lines, and
+.B "-stb / -nstb"
+will/won't strip trailing blanks from each line.
+
+.TP
+.B "-meol / -nmeol / -mfold / -nmfold / -mchop / -nmchop"
+As a while,
+.B -mark
+and
+.B -nmark
+set/inhibit the showing of non-text markers for end-of-line, folded-lines,
+and chopped (truncated) lines.  For more selectivity, use
+.B "-meol / -nmeol"
+to have the end-of-line point mark/unmarked,
+.B "-mfold / -nmfold"
+to have folded lines marked/unmarked, and
+.B "-mchop / -nmchop"
+to have chopped lines marked/unmarked.
+
+.TP
+.B "-legend / -nlegend"
+DO / don't show a small legend (at the bottom of the sheet)
+explaining the non-text markers.
+
+.TP
+\fB-chopmark\fP \fIoctalval\fP / \fB-eolmark\fP \fIoctalval\fP / \fB-foldmark\fP \fIoctalval\fP
+To change the default character used to mark chopped lines, the end-of-line,
+and folded lines, give the character code in octal.
+
+.TP
+.B "-b / -nb"
+do/DON'T allow printing of files that seem to be binary (executables or data).
+
+.TP
+\fB-hbar\fP \fI[lines]\fP / \fB-vbar\fP \fI[chars]\fP
+Add alternating gray/clear bars (horizontal or vertical, respectively) to the
+page to give an old-fashioned data-printout look.  If no argument is given,
+the default is every four lines and every eight columns respectively.
+
+.TP
+\fB-hbargray\fP \fIpercent\fP / \fB-vbargray\fP \fIpercent\fP
+Sets the gray value (percent black: 0=white, 99=black) for the horizontal
+and vertical bars (if selected with
+.B \-hbar
+and/or
+.BR \-vbar ).
+The default values are 50 and 90 respectively.
+
+.TP
+.BI \-bngray percent
+Sets the gray value (see
+.B \-hbargray
+above) for the big number (if selected with
+.BR \-bn ).
+The default value is 96.
+
+.TP
+.BI \-draftgray percent
+Sets the gray value (see
+.B \-hbargray
+above) for the ``draft string'' (if selected with
+.BR \-draft ).
+The default value is 93.
+
+.TP
+.B "-mchop / -nmchop"
+DO/don't put a marker at the end of a line that's been chopped.
+
+.TP
+.B "-mfold / -nmfold"
+do/DON'T put a marker at the end of a line that's been folded.
+
+.TP
+.B "-meol / -nmeol"
+do /DON'T put a marker at the end of a line that's not folded or chopped.
+
+.TP
+\fB-tmp\fP \fI[file]\fP / \fB-ntmp\fP
+DO / don't use a temporary file in determining the number of logical
+pages output (for use in printing the `page x of y' header).
+By default, ``/tmp/a2ps.tmp.$$'' is used.
+
+.TP
+-z / -nz
+do / DON'T allow printing of empty files.  If not allowed, an attempt
+to print an empty file results in no output, while if allowed it
+results in a page with no text (but titles, etc.)
+
+.SH AUTHOR
+Jeffry Friedl (jfriedl@omron.co.jp)

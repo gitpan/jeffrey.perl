@@ -1,0 +1,622 @@
+#!/usr/local/bin/perl
+'di';
+'ig00';
+##############################################################################
+
+##
+## sdiff -- show differences in a diff
+##
+## Jeffrey Friedl (jfriedl@omron.co.jp)
+## $version = "911001.1";
+##
+## BLURB:
+## Show DIFFerences. Accepts a diff as input and output that diff with
+## differences highlighted.  The resulting output can't be used as input to
+## 'patch', but is great for human viewing.
+##
+
+($name = $0) =~ s#.*/##;
+$THRESHOLD = 4;
+$junk = 1;  ##  print non-diff junk lines.
+& ProcessFlags();
+
+& TermcapInit();
+$EMBOLD_ON  = $termcap'EMBOLD_ON;
+$EMBOLD_OFF = $termcap'EMBOLD_OFF;
+
+@line = <>;				## Read the file.
+chop @line;				## Omit newlines.
+grep($_ = &expand_tabs($_), @line);	## Zap tabs.
+
+& ProcessFile();
+exit 0;
+
+##
+## 
+##
+sub ProcessFlags
+{
+    while ($ARGV[0] =~ /^-/)
+    {
+	$_ = shift(@ARGV);
+	last if $_ eq '--';
+
+	if (m/^-t(\d+)$/) {
+	    $THRESHOLD = $1;
+	} elsif ($_ eq '-nj') {
+	    $junk = 0;
+	} elsif ($_ eq '-j') {
+	    $junk = 1;
+	} elsif (($_ eq '-h') || ($_ eq '-help')) {
+	    print "usage: $name [options] [file ...]\n" .
+	          "   Options:\n".
+		  "     -t##    Set the match threshold to ## characters.\n".
+		  "	-nj     Don't print non-diff junk in files.\n".
+		  "	-j      Do print non-diff junk in file.\n".
+		  "	-h      Help\n".
+		  "	--      End flags.\n";
+	   exit 1;
+	} else {
+	    print "$name: unknown flag '$_'. Try \"$name -help\".\n";
+	    exit 1;
+	}
+    }
+}
+
+##
+## ProcessFile()
+##
+## Works with the global @line.
+## For each diff in the file (now in @line), call the appropriate routine
+## to process the diff.
+##
+## Lines not part of the diff are squelched or printed as per the flags.
+##
+sub ProcessFile
+{
+    while (defined($line[0]))
+    {
+	## Is it a regular diff?
+	if ($line[0] =~ m/^(\d+,)?\d+[adc]\d+(,\d+)?$/)
+	{
+	    $fileA = $fileB = undef;
+	    & RegularDiff();
+	    next;
+	}
+
+	## Is it a context diff?
+	elsif ($line[0] =~ m/^\*\*\* \S+/ && $line[1] =~ m/^\-\-\- \S+/)
+	{
+	    ($fileA) = ($line[0] =~ m/^\*\*\* (\S+)/);
+	    ($fileB) = ($line[1] =~ m/^\-\-\- (\S+)/);
+	    print "$line[0]\n$line[1]\n";
+	    shift(@line); shift(@line);  ## get rid of it.
+	    & ContextDiff();
+	} elsif (($line[0] eq '***************') &&
+		 ($line[1] =~ /^\*\*\* / || $line[1] =~ /^\-\-\- /)) {
+	    ## A context diff reject file.
+	    & ContextDiff();
+	}
+
+	## Neither....
+	else {
+	    print "$line[0]\n" if $junk; ## Leading Junk
+	    shift(@line);
+	}
+    }
+}
+
+##
+## RegularDiff()
+##
+## Looks at the regular (as opposed to context) diff at the beginning
+## of the @line array and prints it with difference highlited.
+## The diff is removed from the @line array.
+##
+sub RegularDiff
+{
+    undef @linesA;
+    undef @linesB;
+    $header = $_ = shift(@line);
+    die 'error' if (!/(\d+)(,(\d+))?([adc])(\d+)(,(\d+))?/);
+    $startA = $1;
+    $endA = $3 ? $3 : $startA;
+    $cmd = $4;
+    $startB = $5;
+    $endB = $7 ? $7 : $startB;
+
+    if (($cmd eq 'd') || ($cmd eq 'c')) {
+	$count = $endA - $startA + 1;
+	push(@linesA, shift(@line)) while $count-- && $line[0] =~ m/^</;
+	die "sync error.. $count" if $count != -1;
+    }
+    if ($cmd eq 'c') {
+	die 'sync error' if (shift(@line) ne '---');
+    }
+    if (($cmd eq 'a') || ($cmd eq 'c')) {
+	$count = $endB - $startB + 1;
+	push(@linesB, shift(@line)) while $count-- && $line[0] =~ m/^>/;
+	die 'sync error' if $count != -1;
+    }
+
+    print "$header\n";
+    if ($cmd ne 'c') {
+	foreach $line (@linesA, @linesB) {
+ 	    if ($line =~ m/^([<>] )(.*\S)(\s*)$/) {
+		print "$1$EMBOLD_ON$2$EMBOLD_OFF$3\n";
+	    } else {
+		print "$line\n";
+	    }
+	}
+    } else {
+	local($dA, $dB) = ("", "");
+	grep($dA .= substr($_, 2)."\n", @linesA);
+	grep($dB .= substr($_, 2)."\n", @linesB);
+	chop($dA, $dB);
+	($dA, $dB) = &FindDifferences($dA, $dB);
+
+	$dA =~ s/\n/\n< /g;
+	$dB =~ s/\n/\n> /g;
+	print "< $dA\n---\n> $dB\n";
+    }
+}
+
+##
+## ContextDiff()
+##
+## Like RegularDiff() above, but for context diffs.
+##
+sub ContextDiff
+{
+    print("diff [$fileA] [$fileB]\n");
+
+    ## Search for patch peices.
+    while ($line[0] eq "***************")
+    {
+	shift(@line);
+
+	## expect '*** startline,endline ***'
+	if ($line[0] =~ m/^\*\*\* (\d+),(\d+) \*\*\*\*$/) {
+	    ($startA, $endA) = ($1, $2);
+	} elsif ($line[0] =~ m/^\*\*\* (\d+) \*\*\*\*$/) {
+	    ($startA, $endA) = ($1, $1);
+	} else {
+	    die "error [$line[0]]";
+	}
+
+	shift(@line);
+	undef @linesA;
+	undef @linesB;
+
+	## read diff part for file 'A'
+	push(@linesA, shift(@line)) while ($line[0] =~ m/^[-+! ] /);
+
+	die "length wrong" if $#linesA != -1 && $#linesA != $endA - $startA;
+
+	## expect '--- startline,endline ---'
+	if ($line[0] =~ m/^--- (\d+),(\d+) ----$/) {
+	    ($startB, $endB) = ($1, $2);
+	} elsif ($line[0] =~ m/^--- (\d+) ----$/) {
+	    ($startB, $endB) = ($1, $1);
+	} else {
+	    die "error";
+	}
+
+	shift(@line);
+
+	## read diff part for file 'B'
+	push(@linesB, shift(@line)) while ($line[0] =~ /^[-+! ] /);
+
+	die "length wrong" if $#linesB != -1 && $#linesB != $endB - $startB;
+
+	## now have diff
+	& ShowContextDiff();
+    }
+}
+
+##
+## Continuation of ContextDiff() above.
+##
+sub ShowContextDiff
+{
+    local($marka, $markb) = (0, 0);
+    local($dA, $dB);
+
+    ## look for sets of '!' lines
+    while ($marka <= $#linesA)
+    {
+	($dA, $dB) = ("","");
+	$marka++ while ($linesA[$marka] =~ m/^[-+ ]/);
+	last if $marka > $#linesA;
+	die "error" if $linesA[$marka] !~ m/^!/;
+	    
+	#found one.. now match up with file B
+	$markb++ while ($linesB[$markb] =~ m/^[-+ ]/);
+	die "error" if $linesB[$markb] !~ m/^!/;
+
+	## collect the diff lines.
+	$locA = $marka;
+	while ($linesA[$marka] =~ /^!/) {
+		$dA .= substr($linesA[$marka], 2)."\n";
+		$linesA[$marka] = "";
+		$marka++;
+	}
+	$locB = $markb;
+	while ($linesB[$markb] =~ /^!/) {
+		$dB .= substr($linesB[$markb], 2)."\n";
+		$linesB[$markb] = "";
+		$markb++;
+	}
+
+	chop($dA, $dB);
+	($dA, $dB) = &FindDifferences($dA, $dB);
+
+	$dA =~ s/\n/\n! /g;
+	$dB =~ s/\n/\n! /g;
+	$linesA[$locA] = "! ".$dA;
+	$linesB[$locB] = "! ".$dB;
+    }
+
+    print "############################################################\n";
+    print "*** $startA,$endA ****\n";
+    foreach (@linesA) {
+	if (m/^([+-] )(.*)/) {
+	    print "$1$EMBOLD_ON$2$EMBOLD_OFF\n";
+	} elsif (m/^  /) {
+	    print "$_\n";
+	} elsif (m/^! /) {
+	    print "$_\n";
+	} elsif ($_ ne "") {
+	    die "error";
+	}
+    }
+
+    print "--- $startB,$endB ----\n";
+    foreach (@linesB) {
+	if (m/^([+-] )(.*)/) {
+	    print "$1$EMBOLD_ON$2$EMBOLD_OFF\n";
+	} elsif (m/^  /) {
+	    print "$_\n";
+	} elsif (m/^! /) {
+	    print "$_\n";
+	} elsif ($_ ne "") {
+	    die "error";
+	}
+    }
+}
+
+##
+## string = expand_tabs(string)
+##
+## Expand tabs in the given string and return the new string.
+## It is taken into account that 'diff' prepends two characters to the
+## beginning of lines (which could screw up tabs, so we adjust for it).
+##
+sub expand_tabs
+{
+    local($_) = @_;
+    local($i);
+
+    while ($i = index($_, "\t"), $i >= 0) {
+	$i -= 2; ## lines are shifted two characters by 'diff'.
+	$str = " " x (8 - $i % 8);
+	s/\t/$str/;
+    }
+    $_;
+}
+
+##
+## embold(string)
+##
+## Given a string, returns that string with appropriate embolden codes to
+## cause it to be in bold when printing.  
+##
+## Care is taken to not embolden zero-length strings, and to make sure
+## that newlines are not emboldened.  At least with an xterm, emboldened
+## newlines cause the "boldness" to go to the end of the screen line,
+## to the end of the text line.
+##
+sub embold
+{
+   local($str) = @_;
+   if (length($str) > 0) {
+	$str =~ s/\n/$EMBOLD_OFF\n$EMBOLD_ON/og;
+	$EMBOLD_ON.$str.$EMBOLD_OFF ;
+   } else {
+	$str;
+   }
+}
+
+
+##
+## (str1, str2) = FindDifferences(string1, string2)
+##
+## Given two strings, return copies of those two strings with differences
+## emboldened.
+##
+sub FindDifferences
+{
+    local($dA, $dB) = @_;	     ## String A, B which to compare.
+    local($scA, $ecA, $scB, $ecB) =  ## Start/end character markers for A, B.
+	  (0, length($dA), 0, length($dB));
+    local($a, $b);
+
+    ## bypass any leading and trailing whitespace
+    $scA++ while(substr($dA, $scA, 1) =~ m/\s/);
+    $scB++ while(substr($dB, $scB, 1) =~ m/\s/);
+    $ecA-- while(substr($dA, $ecA, 1) =~ m/\s/);
+    $ecB-- while(substr($dB, $ecB, 1) =~ m/\s/);
+
+    ## bypass leading characters that are the same
+    while ($scA <= $ecA && $scB <= $ecB) {
+       $a = substr($dA, $scA, 1);
+       $b = substr($dB, $scB, 1);
+       if ($a =~ /\s/ && $b =~ /\s/) {
+	    $scA++ while(substr($dA, $scA, 1) =~ m/\s/);
+	    $scB++ while(substr($dB, $scB, 1) =~ m/\s/);
+       } elsif ($a eq $b) {
+	    $scA++;
+	    $scB++;
+       } else {
+	    last;
+       }
+    }
+
+    ## bypass trailing characters that are the same
+    while ($scA <= $ecA && $scB <= $ecB) {
+       $a = substr($dA, $ecA, 1);
+       $b = substr($dB, $ecB, 1);
+       if ($a =~ /\s/ && $b =~ /\s/) {
+	    $ecA-- while(substr($dA, $ecA, 1) =~ m/\s/);
+	    $ecB-- while(substr($dB, $ecB, 1) =~ m/\s/);
+       } elsif ($a eq $b) {
+	    $ecA--;
+	    $ecB--;
+       } else {
+	    last;
+       }
+    }
+
+    ## now make visible
+    if (($scA <= $ecA) && ($scB <= $ecB)) {
+	local($alen, $blen) = ($ecA - $scA +1, $ecB - $scB + 1);
+	local($A, $B) = &TryMore(substr($dA, $scA, $alen),
+			substr($dB, $scB, $blen));
+
+	substr($dA, $scA, $alen) = $A;
+	substr($dB, $scB, $blen) = $B;
+    } else {
+	if ($scA <= $ecA) {
+	    substr($dA, $scA, $ecA-$scA+1) =
+		&embold(substr($dA, $scA, $ecA-$scA+1));
+	}
+	if ($scB <= $ecB) {
+	    substr($dB, $scB, $ecB-$scB+1) =
+		&embold(substr($dB, $scB, $ecB-$scB+1));
+	}
+    }
+
+    ($dA, $dB);
+}
+
+
+##
+## (str1, str2) = TryMore(string1, string2)
+##
+## Given two strings that start and end differently, but may have
+## sets of common characters within them, this routine will return
+## those same strings with EMBOLD_ON and EMBOLD_OFF control characters
+## inserted such that the differences are embolded.
+##
+## Groups of adjacent whitespace is considered to be one character.
+## Parts that are the same must be at least $THRESHOLD (a global variable)
+## characters in length to be considered really the same.
+##
+## The modified strings are returned.
+##
+sub TryMore
+{
+    local($dA, $dB) = @_;
+    local($best, $la, $lb, $count, $astart, $bstart, $alen, $blen) = (0);
+    local($diffA, $diffB, $sameA, $sameB, $restA, $restB) = ("", "");
+    local($lenA, $lenB) = (length($dA)-$THRESHOLD, length($dB)-$THRESHOLD);
+
+    sub min { local($a, $b) = @_; ($a > $b ? $b : $a); }
+
+    for $length (1.. &min($lenA, $lenB)) {
+	($best, $la, $lb) = (0, 0, 0);
+
+	if ($length <= $lenA) {
+	    for $chop (0..$length) {
+		($count, $la, $lb) = 
+		    &LenThatMatches(substr($dA, $length), substr($dB, $chop));
+		if ($count > $best) {
+		    ($best , $astart, $bstart, $alen, $blen) =
+		    ($count, $length, $chop,   $la,   $lb);
+		}
+	    }
+	}
+	if ($length <= $lenB) {
+	    for $chop (0..$length) {
+		($count, $la, $lb) = 
+		    &LenThatMatches(substr($dA, $chop), substr($dB, $length));
+		if ($count > $best) {
+		    ($best , $astart, $bstart, $alen, $blen) =
+		    ($count, $chop,   $length, $la,   $lb);
+		}
+	    }
+	}
+	last if ($best >= $THRESHOLD);
+    }
+
+    if ($best >= $THRESHOLD) {
+	$diffA = &embold(substr($dA, 0, $astart)) if $astart != 0;
+	$diffB = &embold(substr($dB, 0, $bstart)) if $bstart != 0;
+	$sameA = substr($dA, $astart, $alen);
+	$sameB = substr($dB, $bstart, $blen);
+	($restA, $restB) = &TryMore(substr($dA, $astart + $alen),
+			            substr($dB, $bstart + $blen));
+
+	("$diffA$sameA$restA", "$diffB$sameB$restB");
+    }
+    else
+    {
+	(&embold($dA), &embold($dB));
+    }
+}
+
+##
+## LenThatMatches(string1, string2)
+##
+## Given two strings, returns three items:
+##   1) The number of leading logical characters that matched between
+##	the two strings (1+ characters of whitespace count as one logical
+##	character)
+##
+##   2) The actual length that matched, in the first line (could be greater
+##	thant the first item if there are globs of whitespace).
+##
+##   3) The actual length that matched, in the second line (could be greater
+##	thant the first item if there are globs of whitespace).
+##
+## An example (in the example, the '_' character represents a space):
+##	&LenThatMatches("this___X", "this__Y")
+## would return:
+##	(5, 7, 6)
+##
+sub LenThatMatches
+{
+    local($dA, $dB) = @_;  ## dA,dB ==  difference line 'A', 'B'.
+    local($scA, $ecA) = (0, length($dA));	## start,end char index for A
+    local($scB, $ecB) = (0, length($dB));	## start,end char index for B
+    local($a, $b);
+    local($count) = 0;  ## count of leading characters that are the same.
+
+
+    while ($scA <= $ecA && $scB <= $ecB) {
+       $a = substr($dA, $scA, 1); ## Nab the first character
+       $b = substr($dB, $scB, 1); ##   of each line.
+       if ($a =~ /\s/ && $b =~ /\s/) {
+	    $count++; #any whitespace counts as one character.
+	    $scA++ while(substr($dA, $scA, 1) =~ m/\s/); ## skip all whitespace
+	    $scB++ while(substr($dB, $scB, 1) =~ m/\s/); ## skip all whitespace
+       } elsif ($a eq $b) {
+	    $count++; ## a character-for-character match
+	    $scA++;
+	    $scB++;
+       } else {
+	    last;  ## oops, something didn't match.
+       }
+    }
+
+    ($count, $scA, $scB);
+}
+
+##
+## TermcapInit()
+## [no arguments, no return value]
+##
+## Initializes the variables
+##	$termcap'EMBOLD_ON
+##	$termcap'EMBOLD_OFF
+##
+## which are the codes to turn highlighting on and off.
+##
+## This is really a pretty horrid implementation.
+##
+sub TermcapInit
+{
+    package termcap;
+    local($term) = $ENV{'TERM'};
+    sub set_vt100_codes {
+	$EMBOLD_ON  = "\033[7m";
+	$EMBOLD_OFF = "\033[m";
+    }
+
+    ##
+    ## As a shortcut, if the term is an xterm (or kterm) or vt100,
+    ## we'll return the known values right off.
+    ##
+    ## Actually, so many terminals use the same ones, if we can't
+    ## find the TERMCAP variable, we'll just return these by default.
+    ##
+    if (defined($term) &&
+	($term eq 'xterm' || $term eq 'kterm' || $term eq 'vt100')) {
+	return &set_vt100_codes;
+    }
+
+    $_ = $ENV{'TERMCAP'} || (return &set_vt100_codes);
+
+    ##
+    ## The contents of the TERMCAP variable may well be just a filename
+    ## that points to a file containing the entry.  We should go look there
+    ## and pull it out, but we're being lazy today, so we'll just
+    ## return the vt100 codes again.
+    ##
+    return &set_vt100_codes if m#^/#;
+
+    s/^[^:]*://; ## remove the leading name crap
+    s/\\E/\033/g;  ## make the escapes real.
+    @entries = split(':', $_);
+    foreach $_ (sort(@entries)) {
+	next if m/^\s*$/;
+
+	if (m/^(\w\w)[#=](.*)$/) {
+	    eval(qq/\$$1 = "$2";/) || die qq/bad eval(\$$1 = "$2";)/;
+	} elsif (m/^(\w\w)$/) {
+	    eval(qq/\$$1 = 1;/) || die qq/bad eval(\$$1 = 1;)/;
+	} else {
+	    #print "unknown [$_]\n";
+	}
+    }
+    if (defined($so) && defined($se)) {
+	$EMBOLD_ON = $so;
+	$EMBOLD_OFF = $se;
+    } elsif ((defined($mr) || defined($md)) && defined($me)) {
+	$EMBOLD_ON = defined($mr) ? $mr : $md;
+	$EMBOLD_OFF = $me;
+    } else {
+	die "$0: can't figure how to embold text.\n";
+    }
+}
+##############################################################################
+__END__
+.00;			# finish .ig
+ 
+'di			\" finish diversion--previous line must be blank
+.nr nl 0-1		\" fake up transition to first page again
+.nr % 0			\" start at page 1
+.\"____________________________NORMAL_MAN_PAGE_BELOW_________________
+.TH sdiff 1 "Oct 1991"
+.SH NAME
+sdiff \- show diff (print a diff with differences emboldened)
+.SH SYNOPSIS
+sdiff "[options] [files...]"
+.SH DESCRIPTION
+.I Sdiff
+is a filter which accepts the output of diff as input
+(either in files or stdin) and echos it with the non-whitespace
+differences emboldened for easy viewing.
+.PP
+There must be some number of adjacent characters the same between the two
+parts of the diff to be considered matching (and hence not emboldened).
+By default this is four, but can be changed with the
+.BR "-t" "##"
+option.
+.PP
+By default, lines not part of a diff are passed through unchanged.
+They can be suppressed with the
+.B \-nj
+(No Junk) flag and forced (i.e. the default) with the
+.B \-j
+flag.
+.PP
+A short help message can be printed with the
+.B \-h
+flag.
+.SH BUGS
+Generally slow for large differences.
+.br
+Could be more intuitive in displaying differences.
+.SH AUTHOR
+Jeffrey Friedl (jfriedl@omron.co.jp), Omron Corporation.

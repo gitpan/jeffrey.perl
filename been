@@ -1,0 +1,895 @@
+#!/usr/local/bin/perl -w
+'di';
+'ig00';
+##############################################################################
+##
+## Jeffrey Friedl
+## jfriedl@omron.co.jp
+#$version = "960324.6";
+## 960324.6 - I got sick and tired of doing "been -a | egrep -i whatever"
+##            so now non-filename args are taken to be perl regexes.
+## 960205.5 - small cleanup for perl5
+## 940905.4 - added limits to -f and -p flags.
+##
+## been -- how long has it been since ____ (or until ____).
+##
+## BLURB:
+## This program reports the time since or until user-specified events.  You
+## indicate events (when you were born, when your passport expires,
+## when the turn of the century is, when the last time you called your
+## family, when that report is due, when you intend to graduate...
+## whatever)... you indicate them in a data file. Running "been" (I run it
+## in my login script) will tell you how long since or until the events.
+## Special handling for yearly events.... birthdays will be reported along
+## the lines of:
+##	``7 days until birthday of Michael Friedl (29 on Aug 31, 1992)''
+##
+##  This program is also a man page.... run through "nroff -man".
+##
+##  The bulk of this program written in the perl3.x era.
+##
+
+
+&init;
+
+## read flags
+while(@ARGV && $ARGV[$[] =~ /^-[^-]/) {
+    &parse_arg(shift(@ARGV), "the command line");
+}
+
+## pull out any args that aren't filenames
+foreach $arg (@ARGV) {
+    if (-f $arg) {
+	push(@FILES, $arg);
+    } else {
+	push(@GREP, $arg);
+    }
+}
+@ARGV = @FILES;
+if (@GREP) {
+    $show_all = 1;
+    $grep = join('|', @GREP); ## nothing fancy here
+    if (!eval('"x" =~ m/$grep/; 1')) {
+	($error = $@) =~ s/\bin regexp .*\n//;
+	die ("$0: bad regex: $error\n");
+    }
+}
+
+
+##
+## The default file is "$HOME/.been" if none specified.
+##
+if (@ARGV == 0) {
+    if (-f "$ENV{'HOME'}/.been") {
+        unshift(@ARGV, "$ENV{'HOME'}/.been");
+    } else {
+	exit(0);
+    }
+}
+## for each line...
+while(<>) {
+    s/\s*#.*$//;  	## omit comments.
+    next if m/^\s*$/;	## skip blank lines.
+
+    ## allow for options within the file.
+    if (m/^\s*options?\s*:\s*(\S*)\s*$/) {
+        &parse_arg($1, qq{"$ARGV" line $.});
+	next;
+    }
+
+    local($relative, $date, $flags, $msg, $m, $d, $y);
+    local($delta_y, $delta_m, $delta_d);
+    local($limit_y, $limit_m, $limit_d) = ();
+    local($isunsure) = (0);
+
+    s/^\s+//;	## remove leading blanks.
+    s/\s+$//;	## remove trailing blanks.
+
+    ## 
+    (($date, $flags, $msg) = split(/\s*:\s*/, $_, 3)) ||
+	die qq/$0: bad line [$_] (at "$ARGV" line $.).\n/;
+    $flags =~ tr/A-Z/a-z/;
+    next if (!($show_all || $calendar) && $flags =~ /\b0[wmdy]\b/);
+    next if (($flags =~ s/\bcal-?only\b//) && !$calendar);
+
+    $isunsure = 1 if $date =~ s/\?//g;
+    $year_is_real = 1;
+    study($date);
+
+    ##
+    ## Various regex's because some versions of perl
+    ## can't handle so many ()'s inside a regex.
+    ##
+
+    $regex1 = '^(\d+)[-\s.//]*('.
+              'jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec'.
+              ')[-\s.//]*([sh]?\d+)?$';
+
+    $regex2 = '^(\d+)[-\s.//]*'.
+              '(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|'.
+              'aug(ust)?|sep(tember)?|oct(ober)?|nov(ember)?|dec(ember)?)'.
+              '[-\s.//]*([sh]?\d+)?$';
+
+    $regex3 = '^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)'.
+              '\s*(\d+)(st|nd|rd|th)?\s*,?\s*([sh]?\d+)?$';
+
+    $regex4 = '^(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|'.
+              'aug(ust)?|sep(tember)?|oct(ober)?|nov(ember)?|dec(ember)?)'.
+              '\s*(\d+)(st|nd|rd|th)?\s*,?\s*([sh]?\d+)?$';
+
+    ##
+    ## An "American" date in the forms
+    ##		m/d/y	m-d-y
+    ##
+    if ($date =~ m#^(\d+)\s*[-/]\s*(\d+)(\s*[-/]\s*([sh]?\d+))?$#i) {
+	($m, $d, $y) = ($1, $2, $4);
+	$y = &next_year_for_date($m, $d) if !defined($y);
+	$y = &showa_year($y, $m, $d) if $y =~ /^s/i;
+	$y = &heisei_year($y, $m, $d) if $y =~ /^h/i;
+
+    ##
+    ## A date in the form "12 Apr 66".
+    ## Seperators ( - / . ) are optional
+    ##
+    } elsif ($] < 4 && $date =~ m#$regex1#oi) {
+	($d, $m, $y) = ($1, $month{&lower($2)}, $3);
+	$y = &next_year_for_date($m, $d) if !defined($y);
+	$y = &showa_year($y, $m, $d) if $y =~ /^s/i;
+	$y = &heisei_year($y, $m, $d) if $y =~ /^h/i;
+
+
+    } elsif ($] >= 4 && $date =~ m#$regex2#oi) {
+	($d, $m, $y) = ($1, $month{&lower($2)}, $14);
+	$y = &next_year_for_date($m, $d) if !defined($y);
+	$y = &showa_year($y, $m, $d) if $y =~ /^s/i;
+	$y = &heisei_year($y, $m, $d) if $y =~ /^h/i;
+
+    ##
+    ## Like the above, but in the form "Apr 12, 1966".
+    ## The day-of-the-month may have an optional "st", "nd", "rd", or "th",
+    ## even if it doesn't make sense (such as "April 12st").
+    ##
+    } elsif ($] < 4 && $date =~ m#$regex3#oi) {
+	($m, $d, $y) = ($month{&lower($1)}, $2, $4);
+	$y = &next_year_for_date($m, $d) if !defined($y);
+	$y = &showa_year($y, $m, $d) if $y =~ /^s/i;
+	$y = &heisei_year($y, $m, $d) if $y =~ /^h/i;
+
+    } elsif ($] >=4 && $date =~ m#$regex4#oi) {
+	($m, $d, $y) = ($month{&lower($1)}, $11, $13);
+	$y = &next_year_for_date($m, $d) if !defined($y);
+	$y = &showa_year($y, $m, $d) if $y =~ /^s/i;
+	$y = &heisei_year($y, $m, $d) if $y =~ /^h/i;
+
+    ##
+    ## A "metric" date in the form [y.m.d]
+    ##
+    } elsif ($date =~ m#^(([hs]?\d+)\s*\.\s*)?(\d+)\s*\.\s*(\d+)$#i) {
+	($y, $m, $d) = ($1, $3, $4);
+	$y = &next_year_for_date($m, $d) if !defined($y);
+	$y = &showa_year($y, $m, $d) if $y =~ /^s/i;
+	$y = &heisei_year($y, $m, $d) if $y =~ /^h/i;
+
+    } else {
+	die qq/$0: can\'t decipher date "$date" (at "$ARGV" line $.).\n/;
+    }
+    $y += 1900 if ($y < 100);
+    die qq/$0: no such date as "$date" (at "$ARGV" line $.).\n/
+	if !&date_ok($y, $m, $d);
+
+    ##
+    ## Special work if a birthday/anniversary
+    ##
+    if (defined($ignore_annual)) {
+       $msg = "birth of $msg" if ($flags =~ s/\b(bday|birthday)\b//);
+       $flags =~ s/\b(annual|anniversary|anniv)\b//;
+    }
+    elsif ($flags =~ s/\b(bday|birthday|annual|anniversary|anniv)\b//)
+    {
+	local($what);
+	if ($calendar) {
+	    $what = "";
+	} elsif ($1 eq "bday" || $1 eq "birthday") {
+	    $what = "birthday of ";
+	} elsif ($1 eq "anniv" || $1 eq "anniversary") {
+	    $what = "anniversary of ";
+	} else {
+	    $what = "";
+	}
+	if ($year_is_real) {
+	    local($tmp) = &next_year_for_date($m, $d);
+	    local($age) = $tmp - $y;
+ 	    $y = $tmp;
+	    local($note) = $isunsure ? "?" : "";
+	    if (!$calendar) {
+	        $msg = "$what$msg ($age$note on $monthname[$m] $d, $y)";
+	    } elsif ($calendar == 1) {
+		$msg = "$msg ($age$note)";
+		$year_is_real = 1; ## since we're ascribing an age, we need
+				   ## to set the year as real.
+	    } #else if calendar > 1, just leave $msg alone.
+	} else {
+	    $msg = "$what$msg";
+        }
+    }
+
+    $holiday = ($flags =~ s/\bhol(iday)?\b//);
+    $nocal = ($flags =~ s/\bno-?cal\b//);
+    if ($calendar) {
+	next if $nocal;
+	$out = "$m/$d";
+        $out .= "/$y" if $year_is_real;
+	$out .= '*' if $holiday;
+	$out .= " $msg\n";
+	if ($year_is_real) {
+	    push(@with_year, $out);
+	} else {
+	    push(@without_year, $out);
+	}
+
+	next;
+    }
+
+    $relative = &datecmp($y,$m,$d, $Y, $M, $D);
+
+    if ($relative eq 'since') {
+	next if $future_only;
+	$delta_y = $Y - $y;
+	$delta_m = $M - $m;
+	$delta_d = $D - $d;
+	if ($delta_d < 0) {
+	    $delta_m--;
+	    $delta_d += &dim($m, $y);
+	}
+    } elsif ($relative eq 'until') {
+	next if $past_only;
+	$delta_y = $y - $Y;
+	$delta_m = $m - $M;
+	$delta_d = $d - $D;
+	if ($delta_d < 0) {
+	    $delta_m--;
+	    if ($m == 1) {
+		$delta_d += &dim(12, $y-1);
+	    } else {
+		$delta_d += &dim($m-1, $y);
+	    }
+	}
+    }
+    else {
+	$delta_y = $delta_m = $delta_d = 0;
+    }
+
+    if ($delta_m < 0) {
+	    $delta_y--;
+	    $delta_m += 12;
+    }
+
+    ##
+    ## See if the flags indicate a limit.
+    ##
+    while ($flags =~ s/\b(\d+)([mdyw])\b//i) {
+	$limit_y = $1 if $2 eq 'Y' || $2 eq 'y';
+	$limit_m = $1 if $2 eq 'M' || $2 eq 'm';
+	$limit_d = $1 if $2 eq 'D' || $2 eq 'd';
+	$limit_d = $1*7 if $2 eq 'W' || $2 eq 'w';
+    }
+
+    ##
+    ## override with global limit if one exists.
+    ##
+    if (defined($Limit_y) || defined($Limit_m) || defined($Limit_d)) {
+	($limit_y, $limit_m, $limit_d) = ($Limit_y, $Limit_m, $Limit_d);
+    }
+
+    ##
+    ## ... And decide if we are within the limit or not.
+    ##
+    if (!$show_all)
+    {
+	if (defined($limit_d)) {
+	    next if ($delta_d > $limit_d || $delta_m || $delta_y);
+	}
+	if (defined($limit_m)) {
+	    next if ($delta_m > $limit_m || $delta_y ||
+		    ($delta_m == $limit_m && $delta_d));
+	}
+	if (defined($limit_y)) {
+	    next if ($delta_y > $limit_y ||
+		    ($delta_y == $limit_y && ($delta_m || $delta_d)));
+	}
+    }
+
+    if ($flags =~ /\S/) {
+	$flags =~ s/\s+/ /;
+	$flags =~ s/^\s//;
+	$flags =~ s/\s$//;
+	print "$0: unknown option [$flags] on line $..\n";
+    }
+
+    if ($delta_y) {
+	$span = $delta_y==1 ? "$delta_y year"  : "$delta_y years";
+    } else {
+	$span = '';
+    }
+    if ($delta_m) {
+	$span .= ", " if $span ne '';
+        $span .= $delta_m==1 ? "$delta_m month" : "$delta_m months";
+    }
+    if ($delta_d) {
+	$span .= ", " if $span ne '';
+	$span .= $delta_d==1 ? "$delta_d day"   : "$delta_d days";
+    }
+
+    if ($span eq '') {
+        $span = "NO TIME (TODAY!)";
+	$relative = 'until';
+    }
+
+    if ($msg =~ /%/) {
+	$msg =~ s/%S/$span/g;
+	$msg =~ s/%R/$relative/g;
+	$string = "$msg\n";
+    } else {
+        $string = sprintf("$span $relative $msg\n");
+    }
+
+    next if defined($grep) && $string !~ /$grep/io;
+
+    if ($dosort) {
+	local($num) = sprintf("%04d%02d%02d", $delta_y, $delta_m, $delta_d);
+	local($foo) = ($relative eq 'since' && !$reverse_sort) ?
+		    ($X - $num) : ($X + $num);
+	push(@sort, sprintf("%010d%04d:$string", $foo, $counter++));
+    } else {
+	print $string;
+    }
+}
+
+if ($calendar) {
+    print @without_year;
+    print @with_year;
+    exit 0;
+}
+
+if ($showdate) {
+    local($msg) = "Today is $today.\n";
+
+    if (!defined($grep) || ($msg =~ /$grep/io))
+    {
+	if ($dosort) {
+	    push(@sort, sprintf("%010d%04d:$msg", $X, $counter++));
+	} else {
+	    print "$msg";
+	}
+    }
+}
+
+if ($dosort) {
+	foreach (sort(@sort)) {
+	    s/^\d+://;
+	    print;
+	}
+}
+
+
+
+##
+## string datecmp(YEAR1, MONTH1, DATE1,   YEAR2, MONTH2, DATE2)
+##
+## Given valid dates date1 (YEAR1, MONTH1, DATE1) and
+## date2 (YEAR2, MONTH2, DATE2), return 'since' if date1 is before date2,
+## 'until' if date1 is later than date2, and 'same' if they are the same date.
+##
+## YEAR[12] are absoute years (i.e. "1992", not "92")
+## MONTH[12] in range 1..12
+## DATE[12] in range 1..31
+##
+sub datecmp { local($y1, $m1, $d1, $y2, $m2, $d2, $end) = @_;
+    die "too many arguments to fcn" if defined($end);
+    if ($y1 < $y2) {
+	return 'since';
+    } elsif ($y1 > $y2) {
+	return 'until';
+    } elsif ($m1 < $m2) {
+	return 'since';
+    } elsif ($m1 > $m2) {
+	return 'until';
+    } elsif ($d1 < $d2) {
+	return 'since';
+    } elsif ($d1 > $d2) {
+	return 'until';
+    } else {
+	return 'same';
+    }
+}
+
+##
+## NUM dim(num MONTH, num YEAR)
+##
+## Days In Month -- returns the number of days
+## Returns the number of days in the given MONTH of the given YEAR.
+## 
+## YEAR is an absoute year (i.e. "1992", not "92")
+## MONTH in range 1..12
+##
+sub dim { local($month, $year, $end) = @_;
+    die "too many arguments to fcn" if defined($end);
+    return (0, 31, 0, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)[$month]
+	if $month != 2;
+    return (($year % 4 == 0) && ($year % 200 != 0)) ? 29 : 28;
+}
+
+##
+## BOOLEAN date_ok(num YEAR, num MONTH, num DATE)
+##
+## For an OK date:
+## 	YEAR is an absoute year (i.e. "1992", not "92")
+## 	MONTH in range 1..12
+## 	DATE in range 1..31 (depending upon month/year)
+##
+## Returns true if the given date exists (i.e. Feb 29, 1991 doesn't exist).
+## Doesn't take in account various changes in the calander that happened
+## over time (last such change in the 17th century??)
+##
+sub date_ok { local($year, $month, $date, $end) = @_;
+    die "too many arguments to fcn" if defined($end);
+    return 0 if ($year < 0);
+    return 0 if ($month < 1 || $month > 12);
+    return 0 if ($date < 0 || $date > &dim($month, $year));
+    return 1;
+}
+
+##
+## STRING = lower(string STRING)
+##
+## Return the string lowercased (is that a verb?).
+##
+sub lower { local($_, $end) = @_;
+    die "too many arguments to fcn" if defined($end);
+    tr/A-Z/a-z/;
+    $_;
+}
+
+##
+## YEAR = next_year_for_date(num MONTH, num DATE)
+##
+## return the year of the next MONTH, DATE combo
+## (either later this year, next year, or later for leap days).
+##
+## YEAR is an absoute year (i.e. "1992", not "92")
+## MONTH in range 1..12
+## DATE in range 1..31
+##
+sub next_year_for_date { local($m, $d, $end) = @_;
+    local($y) = $Y;
+    die "too many arguments to fcn" if defined($end);
+
+    ##
+    ## Global marker to indicate that the 'Year' was not hardcoded...
+    ## it has been derived.
+    ##
+    $year_is_real = 0; 
+
+    $y+=1 if ($m < $M) || ($m == $M && $d < $D);
+
+    ##
+    ## If it's a leap year, make sure it's valid....
+    ##
+    if ($m == 2 && $d == 29) {
+       while (!&date_ok($y, $m, $d)) { $y++; }
+    }
+
+    $y;
+}
+
+##
+## YEAR = heisei_year(string HEISEI_YEAR, num MONTH, num DATE)
+##
+## Return the "real" year, given the YEAR, MONTH, and DATE during
+## the Heisei era.
+##
+## The Heisei era began Jan 8, 1989 and continues until ?????
+##
+## HEISEI_YEAR in range S1..
+## MONTH in range 1..12
+## DATE in range 1..31
+##
+sub heisei_year { local($y, $m, $d, $end) = @_;
+    die "too many arguments to fcn" if defined($end);
+    $y =~ s/^h//i;## remove the 'H' part of the year to leave just the number.
+    die qq/$0: There is no year 0 of Heisei (at "$ARGV" line $.).\n/ if $y == 0;
+    die qq/$0: Heisei Gannen started on Jan 7 (at "$ARGV" line $.).\n/
+	if $y == 1 && $m == 1 && $d < 7;
+    $y += 1988; #convert to "normal" date.
+    $y;
+}
+
+##
+## YEAR = showa_year(string SHOWA_YEAR, num MONTH, num DATE)
+##
+## Return the "real" year, given the YEAR, MONTH, and DATE during
+## the Showa era.
+##
+## The Showa era began sometime about 1925, and continued
+## until Jan 7, 1989.
+##
+## SHOWA_YEAR in range S1..S64
+## MONTH in range 1..12
+## DATE in range 1..31
+##
+sub showa_year { local($y, $m, $d, $end) = @_;
+    die "too many arguments to fcn" if defined($end);
+    $y =~ s/^s//i; ## remove the 'S' part of the year to leave just the number.
+    die qq/$0: There is no year 0 of Showa (at "$ARGV" line $.).\n/ if $y == 0;
+    die qq/$0: Showa era went until Jan 7, S64 (at "$ARGV" line $.).\n/
+	    if ($y > 64 || ($y == 63 && ($m > 1 || $d > 8)));
+    $y += 1925; #convert to "normal" date.
+    $y;
+}
+
+sub parse_arg { local($ARG, $orig, $end) = @_;
+    die "too many arguments to fcn" if defined($end);
+    local($_) = $ARG;
+    s/^-//;
+    while ($_ ne '') {
+	if (s/^a//) {
+	    $show_all = 1;
+	} elsif (s/^d//) {
+	    $showdate = 1;
+	} elsif (s/^s//) {
+	    $dosort = 1;
+	} elsif (s/^f((\d+)([mdyw]))?//i) {
+	    $future_only = 1;
+	    if ($1 ne '') {
+		($Limit_y, $Limit_m, $Limit_d) = (undef,undef,undef);
+		$Limit_y = $2   if $3 eq 'Y' || $3 eq 'y';
+		$Limit_m = $2   if $3 eq 'M' || $3 eq 'm';
+		$Limit_d = $2   if $3 eq 'D' || $3 eq 'd';
+		$Limit_d = $2*7 if $3 eq 'W' || $3 eq 'w';
+	    }
+	} elsif (s/^p((\d+)([mdyw]))?//i) {
+	    $past_only = 1;
+	    if ($1 ne '') {
+		($Limit_y, $Limit_m, $Limit_d) = (undef,undef,undef);
+		$Limit_y = $2 if $3 eq 'Y' || $3 eq 'y';
+		$Limit_m = $2 if $3 eq 'M' || $3 eq 'm';
+		$Limit_d = $2 if $3 eq 'D' || $3 eq 'd';
+		$Limit_d = $2*7 if $3 eq 'W' || $3 eq 'w';
+	    }
+	} elsif (s/^r//) {
+	    $dosort = $reverse_sort = 1;
+	} elsif (s/^i//) {
+	    $ignore_annual = 1;
+	} elsif (s/^c//) {
+	    $calendar++;
+	} elsif (s/^-//) {
+	    last;
+	} else {
+	    die qq/$0: unknown argument "$_" from $orig.\n/;
+	}
+    }
+}
+
+##
+## void INIT()
+##
+## Set up some things.....
+##
+sub init
+{
+    die "too many arguments to fcn" if defined($_[$[]);
+    ##
+    ## Replace the full pathname of the executable with the base name.
+    ## This makes error reporting less informative, but more pretty. (-:
+    ##
+    $0 =~ s#.*\/##;
+
+    ##
+    ## Build an associative array which will give us a month number from
+    ## a name.... for example $month{'april'} is four.
+    ##
+    %month = (
+	'jan',  1, 'january', 1,
+	'feb',  2, 'february', 2,
+	'mar',  3, 'march', 3,
+	'apr',  4, 'april', 4,
+	'may',  5,
+	'jun',  6, 'june', 6,
+	'jul',  7, 'july', 7,
+	'aug',  8, 'august', 8,
+	'sep',  9, 'september', 9,
+	'oct', 10, 'october', 10,
+	'nov', 11, 'november', 11,
+	'dec', 12, 'december', 12
+    );
+
+    @monthname = ('x', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+		       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec');
+
+    ##
+    ## Get the current date.
+    ##
+    ($D,$M,$Y) = (localtime)[3,4,5];
+    $M++; 		## M was zero-based...want one-based.
+    $Y += 1900;		## Make an "absolute" year.
+    $today = "$monthname[$M] $D, $Y";
+
+
+    $counter = 0;
+    $X = 1000000000;
+
+    ##
+    ## Defaults that flags might change.
+    ##
+    $show_all = 0;    ## If true, show every line (ignore limits).
+    $dosort = 0;      ## Sort by time-till-event.
+    $future_only = 0; ## ignore events in the past.
+    $past_only = 0;   ## ignore events in the future.
+    $reverse_sort = 0;## reverse the order of the sort.
+    $showdate = 0;    ## insert a line for today's date.
+    $calendar = 0;    ## if true, output for a "calender" file.
+}
+##############################################################################
+__END__
+.00;			# finish .ig
+ 
+'di			\" finish diversion--previous line must be blank
+.nr nl 0-1		\" fake up transition to first page again
+.nr % 0			\" start at page 1
+.\"____________________________NORMAL_MAN_PAGE_BELOW_________________
+.TH been 1 "June 1992"
+.SH NAME
+been \- show how long it's been since (or until) events.
+.SH SYNOPSIS
+been [options] [patterns|files...]
+.SH DESCRIPTION
+.I Been
+reads the named files ("$HOME/.been" if none specified) and extracts
+information about when events occured (or will occur), and prints
+the duration since (until) the event.
+.PP
+If there are arguments that are not valid valid filenames, they are
+taken to be perl regular expressions. The
+.B \-a
+option is implied, and only output lines matching the (case insensative)
+regular expression(s) are printed.
+.PP
+Lines in the examined files are of the general format:
+.nf
+
+   <date> : <flags> : <text>
+
+For example, the lines
+
+	July 4th, 1776 : : America was born.
+	1/1/2000       : : the turn of the century.
+
+.fi
+would result (if run on July 3rd, 1992) with the output:
+.nf
+
+	215 years, 11 months, 30 days since America was born.
+	7 years, 5 months, 29 days until the turn of the century.
+
+.fi
+Commets (beginning with '#') and blank lines are ignored.
+.SH CALENDER
+Various programs, such as "calender" (old reminder system) and "pscal"
+(generates postscript calenders) read the file ``~/calender'' for date
+information. The format for ~/calender is not expressive enough for reasonable
+use with
+.IR been ,
+but in an effort to not dupilcate data files, "been -c" will produce as
+output in a format suitable for ~/calender. Further details of this
+process are discussed in a later section.
+.SH DATES
+The date may be given in a variety of formats. All the following refer to
+the same date:
+.nf
+
+      April 12, 1966
+      4/12/66
+      4-12-66
+      66.4.12
+      12-Apr-66
+      12 Apr 66
+
+.fi
+Furthermore, years may be given in Japanese dates with
+prepended 'S' or 'H' for the Showa or Heisei eras, i.e.:
+.nf
+
+      S41.4.12
+      April 12, S41
+
+.fi
+In all cases, the year may be omitted, in which case it is always some time
+until the next occurance of that date. Therefore, the line
+.nf
+
+  25 Dec:: Christmas.
+
+.fi
+would always refer to the "next" Christmas.
+Dec 25.
+.SH FLAGS
+There are two types of flags for the main use of
+.IR been ,
+with additional flags for "been -c" calender processing.
+One type indicates how the line as a whole is
+to be printed. The flags "birthday" (or "bday"), "anniversary" (or "anniv"),
+and "annual" indicate special treatment of yearly events that have occured
+since a specific time (such as birthdays). For example,
+.nf
+
+  30 Apr 1961 :             : Mom & Dad's marriage
+  30 Apr 1961 : anniversary : Mom & Dad's marriage
+  30 Apr 1961 : annual      : Mom & Dad's anniversary
+   1 Jan 1966 :             : Joe Smith was born.
+   1 Jan 1966 : birthday    : Joe Smith
+   1 Jan 1966 : annual      : Joe Smith's birthday
+
+might produce
+
+  31 years, 11 months, 23 days since Mom & Dad's marriage
+  7 days until anniversary of Mom & Dad's marriage (32 on Apr 30, 1993)
+  7 days until Mom & Dad's anniversary (32 on Apr 30, 1993)
+  27 years, 11 days since Joe Smith was born.
+  8 months, 9 days until birthday of Joe Smith (28 on Apr 12, 1994)
+  8 months, 9 days until Joe Smith's birthday (28 on Apr 12, 1994)
+.fi
+
+As you can see, "birthday" and "anniversary" are just special cases
+of "annual".  Lines with these flags are treated as lines without years
+(i.e. always looking forward to the next such date), but the number of years
+that have passed is printed.
+
+These flags can be used without years, but (of course) the number of years
+passed can't be printed. The lines
+.nf
+
+  12 Apr : birthday : Jeffrey Friedl
+  12 Apr :          : birthday of Jeffrey Friedl
+
+produce the same output
+
+  11 months, 20 days until birthday of Jeffrey Friedl
+  11 months, 20 days until birthday of Jeffrey Friedl
+.fi
+
+Finally, for lines with these types of flags, the date can have a question
+mark in it if you are unsure about the year. In such cases, the number of
+years is also printed with a question mark. So, for example, if you weren't
+sure exactly what year someone was born, you might have a line such as:
+.nf
+  May 10, 1955? : birthday : my friend
+
+producing something like
+
+  17 days until birthday of my friend (38? on May 10, 1993)
+.fi
+
+Another type of flag indicates when a line is to be printed.  Flags of the
+form (where '#' are numbers) "#y", "#m", "#w", and "#d" indicate that the
+line shouldn't be printed unless the date of the line is within that number
+of years, months, weeks, or days respectively.
+
+So, for example, a flag of "2w" indicates that the line won't be reported
+until two weeks before the line's date, and will be reported until two weeks
+after the date.
+
+As a special case, dates that have no year, or dates for annual things
+(birthdays, etc.) are reported only before the date (since they are always
+looking forward to the next occurance of that date).
+
+For example, you might have lines such as
+.nf
+
+   Oct  3, 1994: 1m : driver's licence expires.
+   May  7, 1997: 3m : passport licence expires. # contact embasy
+   Dec 11, 1955: 2w birthday: Diane Chomo
+   Mar  3, 1994: 2d : give Bob a call... tell him "good luck" # big test!
+.fi
+
+Lines you want printed always would simply not have a time-limiter flag.
+If you would like to "archive" dates.... have them available but normally
+ignored, you can put a zero-limit (such as "0d"). Such dates will be
+printed *only* when the "-a" flag (see below) is given.  For example,
+.nf
+
+  10 May 1933: 0d : company "Omron" founded.
+.fi
+
+Use of zero-limit flags bypasses the normal date checking when "-a" is not
+given, and is thus quicker for normal use.
+
+For use with "been -c", the flag "no-cal" (or "nocal") means that the
+line should be ignored for "been -c", while "cal-only" (or "calonly) means
+that it should be ignored except for "been -c".  The flag "holiday" causes
+an asterisk to be printed after the date in the output. This tells
+the "pscal" that the date is to be printed in gray (to indicate a holiday).
+.SH OPTIONS
+.TP
+.B \-a
+show all lines (ignore limit flags).
+.TP
+.B \-s
+Sort the output, most-past (or least-future) event first.
+.TP
+.B \-r
+Sort the output, reversed (most future event first).
+.TP
+.B \-i
+Ignore "annual", "birthday", etc. flags. Print all dates with years
+as "XXX since/until YYY".
+.TP
+.BI \-f \[limit]
+Include only future events in the output.
+If
+.IR limit ,
+(which is in the same form as the "2w" example flag above),
+is indicated, all future events within the limit are shown.
+.TP
+.BI \-p \[limit]
+Include only past events in the output.
+If
+.I limit
+is indicated, all past events within the limit are shown.
+.TP
+.B \-d
+Include a line giving today's date at the end of the output (or in the
+appropriate spot if the output is sorted).
+.TP
+.B \-c
+Output is of the format of ~/calender, such that one could
+.nf
+
+       % been -c > ~/calender
+.fi
+
+All birthdays and other annual events are slated for their next occurance
+(i.e. the calender file will be good for the next year), with ages for
+birthdays being printed.  So, for example, the .been line
+.nf
+
+        12 Apr 1966 : 2w birthday : Jeffrey Friedl
+.fi
+
+would cause a line such as
+.nf
+
+        4/12/1994 Jeffrey Friedl (28)
+.fi
+
+to be output. This is fine until after 1994, after which "been -c" must be
+run again to produce the next year's calender file.
+
+The alternate format "been -cc" would remove years (and ages) from birthday
+and other annual entries, such that the output might be like
+.nf
+
+        4/12 Jeffrey Friedl
+.fi
+
+which would be useful for all subsequent years.
+.SH "OPTIONS LINE"
+The .been datafile can have a line or lines of the form
+.nf
+
+  options: <flags>
+.fi
+
+which set the given flags at that point in the file.  The author has found
+the line
+.nf
+
+   options: sd
+.fi
+
+useful.
+.SH BUGS
+Generally slow for large differences.
+.br
+Would still like to have more control over the output format.
+.SH AUTHOR
+Jeffrey Friedl, Omron Corp (jfriedl@omron.co.jp)

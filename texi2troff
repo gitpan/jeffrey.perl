@@ -1,0 +1,895 @@
+#!/usr/local/bin/perl -w
+'di';
+'ig00';
+##############################################################################
+
+##
+## BLURB:
+## Texi -> Troff converter (sort of).  Suitable for rough conversions of
+## gcc.texi, and maybe other GNU texi papers.
+##
+## Then again, maybe not.
+##
+## Jeffrey Friedl (jfriedl@omron.co.jp)
+## July '91
+##
+
+#$version = "960205.011";
+## 960205.011 -- tidied up for perl5
+## 930204.010
+
+& process_args();
+&initialize();
+&output_preamble() if !defined($toc);
+&processfile("", @ARGV);
+exit(0);
+
+##
+## process_args()
+##
+## Does any needed preprocessing of @ARGV.
+## When done, @ARGV is the list of files to work with.
+##
+sub process_args
+{
+    ## usage()... does not return.
+    sub usage
+    {
+	warn "usage: $0 [options] [files...]\n";
+	warn "  -f<file>  :  include lines of <file> as options.\n";
+	warn "  -v        :  note each file inclusion and section start.\n";
+	warn "  -help     :  print this message.\n";
+	warn "  -T        :  use the TT font rather than bold for code.\n";
+	warn "  -o<title> :  omit the named section from the output.\n";
+	warn "  -c        :  produce a table of contents instead.\n";
+	warn "  -s        :  print a short title page.\n";
+	warn "  -D<sym>   :  pre-define (\@set) the given symbol.\n";
+	warn "  -U<sym>   :  pre-undefine (\@clear) the given symbol.\n";
+	die  " (\@set and \@clear are then ignored for -D and -U symbols)\n";
+    }
+
+    ##
+    ## Process flags.
+    ##
+    while ($ARGV[$[] =~ /^-.+/)
+    {
+	local($arg) = shift(@ARGV);
+	if ($arg =~ m/^-v/) {
+	   $verbose = 1;
+	   unshift(@ARGV, "-$1") if $arg =~ m/^-v\s*(.+)$/; ## allow other args
+	} elsif ($arg =~ m/^-T/) {
+	   $useTT = 1;
+	   unshift(@ARGV, "-$1") if $arg =~ m/^-T\s*(.+)$/; ## allow other args
+	} elsif ($arg =~ m/^-s/) {
+	   $short_titlepage = 1;
+	   unshift(@ARGV, "-$1") if $arg =~ m/^-s\s*(.+)$/; ## allow other args
+	} elsif ($arg eq "-help") {
+	   &usage();
+	} elsif ($arg =~ m/^-c/) {  ## Output table of contents instead.
+	    $toc = 1;
+	   unshift(@ARGV, "-$1") if $arg =~ m/^-c\s*(.+)$/; ## allow other args
+	} elsif ($arg =~ m/^-f\s*(.+)/) {  ## load args from file
+	    if (!open(TMP, "<$1")) {
+		warn qq/$0: can't open "$1".\n/;
+	    } else {
+		local(@lines) = <TMP>;
+		close(TMP);
+		chop @lines;
+		## take only lines beginning with '-'
+		unshift(@ARGV, grep(s/^(\s*)-/-/, @lines));
+	    }
+	} elsif ($arg =~ m/^-D\s*(.+)/) {  ## pre-set the argument
+	    $notouch{$1} = 1;
+	    $set{$1} = 1;
+	} elsif ($arg =~ m/^-U\s*(.+)/) {  ## pre-unset the argument
+	    $notouch{$1} = 1;
+	} elsif ($arg =~ m/^-o\s*(.*\S)/) {  ## Omit the named section.
+	    ($arg  = $1) =~ s/\s+/ /g;     ## Squeze extra whitespace.
+	    $arg =~ s/[^\w ]//g;   ## Only letters and spaces.
+	    push(@omit, $arg);
+	} elsif ($arg =~ m/^-o/) {
+	    die "$0: expecting title in same argument as `-o'\n";
+	} else {
+	   die "$0: bad argument '$arg'... try '-help'.\n";
+	}
+    }
+
+    ##
+    ## Default input is from STDIN if nothing else given.
+    ##
+    unshift(@ARGV, '-') if $#ARGV < $[;
+
+    ##
+    ## Look at the first filename argument, if there is one, to see from what
+    ## directory files are being pulled. We'll use this to process includes.
+    ##
+    $source_dir = $1
+	if ($#ARGV >= $[ && ($ARGV[$[] =~ m#^(.*)/.+$#)) && $1 ne ".";
+}
+
+##
+## initialize()
+##
+## Do various initialization.
+##
+sub initialize
+{
+    ##
+    ## We'll allow nested lists.
+    ##
+    $listdepth = 0;
+    $listitem[0] = "???";
+
+    ##
+    ## Begin with filling.
+    ##
+    $nofill = 0;
+
+    ##
+    ## Initialize the fonts..
+    ##
+    $R="1";	#roman    will be font 1
+    $I="2";	#italic   will be font 2
+    $B="3";	#bold     will be font 3
+    $T="3";	#teletype will be font 4
+    $fontopen{"i"     } = "\\f$I";	$fontclose{"i"     } = "\\fP";
+    $fontopen{"var"   } = "\\f$I";	$fontclose{"var"   } = "\\fP";
+    $fontopen{"dfn"   } = "\\f$I";	$fontclose{"dfn"   } = "\\fP";
+    $fontopen{"emph"  } = "\\f$I";	$fontclose{"emph"  } = "\\fP";
+    $fontopen{"cite"  } = "\\f$I";	$fontclose{"cite"  } = "\\fP";
+    $fontopen{"strong"} = "\\f$B";	$fontclose{"strong"} = "\\fP";
+    $fontopen{"b"     } = "\\f$B";	$fontclose{"b"     } = "\\fP";
+    $fontopen{"sc"    } = "\\f$B";	$fontclose{"sc"    } = "\\fP";
+    $fontopen{"tt"    } = "\\f$T";	$fontclose{"tt"    } = "\\fP";
+    $fontopen{"ttfont"} = "\\f$T";	$fontclose{"ttfont"} = "\\fP";
+    $fontopen{"key"   } = "\\f$T";	$fontclose{"key"   } = "\\fP";
+    $fontopen{"kdb"   } = "\\f$T";	$fontclose{"kdb"   } = "\\fP";
+    $fontopen{"kbd"   } = "\\f$T";	$fontclose{"kbd"   } = "\\fP";
+    $fontopen{"ctrl"  } = "\\f$T";	$fontclose{"ctrl"  } = "\\fP";
+    $fontopen{"code"  } = "\\f$T";	$fontclose{"code"  } = "\\fP";
+    $fontopen{"w"     } = "";		$fontclose{"w"     } = "";
+    $fontopen{"file"  } = qq/``\\f$T/;	$fontclose{"file"  } = qq/\\fP''/;
+    $fontopen{"samp"  } = qq/`\\f$T/;	$fontclose{"samp"  } = qq/\\fP'/;
+    $fontopen{"ii"    } = "\\f$I";	$fontclose{"ii"    } = "\\fP";
+    $fontopen{"r"     } = "\\f$R";	$fontclose{"r"     } = "\\fP";
+    $fontopen{"pxref" } = "see \\f$I"; 	$fontclose{"pxref" } = "\\fP";
+    $fontopen{"titlefont"} = "\\s+9";	$fontclose{"titlefont"} = "\\s0";
+}
+
+##
+## output_preamble()
+##
+## Output the nroff preamble.
+##
+sub output_preamble
+{
+    print ".\" This file produced by tex2troff.\n";
+    print ".na\n";	#no adjustments (spreading)
+    print ".nh\n";  #no hyphanization
+    print ".fp 3 TT\n" if defined($useTT);
+
+    # with nroff, no headers or footers
+    print '.if n \{\               '."\n";
+    print '.de @h \" no header     '."\n";
+    print '..                      '."\n";
+    print '.de @f \" no footer     '."\n";
+    print '.. \}                   '."\n";
+
+    print ".if n .pl 75 0\n"; 	 # This matches 'a2ps'...change if you want.
+    print ".if n .ll 80 0\n"; 	 # Set nroff length (this matches 'a2ps')
+    print ".if n .nr pi 2n\n";   # Set the Paragraph Indenet for nroff.
+
+    print ".if t .nr pi 0.15i\n";# Set the Paragraph Indenet for troff.
+    print ".if t .po 0.75i\n";	 # Set the page offset in troff.
+    print ".if t .ll 7.00i\n";	 # Set the line length in troff.
+    print ".if t .nr ii 0.25i\n";# Set the .ip offhang distance.
+}
+
+##
+## If true, multiple newlines will be converted to single ones.
+## Used when newlines could be harmful, such as after ".lp", etc.
+##
+$eatnewlines = 1;
+
+##
+## processfile(history, names...)
+##
+## Each named file is processed in turn.
+## The HISTORY should be 
+##
+sub processfile
+{
+  local($history, @files) = @_;
+  local(*INPUT);
+
+  foreach $file (@files)
+  {
+    $file = "$source_dir/$file"
+	if !-f "$file" && defined($source_dir) && -f "$source_dir/$file";
+
+    if (!open(INPUT, "<$file")) {
+	warn qq/$0: ERROR, can't open "$file"\n/;
+	warn $history if ($history ne "");
+	next;
+    }
+
+    ##
+    ## For each line in the file...
+    ##
+    while (<INPUT>)
+    {
+	## accumulate lines until we have some non-whitespace.
+	$_ .= $new while /^\s*$/ && ($new = <INPUT>);
+
+	##
+	## Eat any leading leading whitspace
+	## (including any newlines if so requested).
+	##
+	if (!$nofill)
+	{
+	    s/^\s+// if ($eatnewlines);
+	    s/^[\t ]+//g;
+	}
+	$eatnewlines = 0;
+
+	##
+	## Hide things in the text which may be important to troff.
+	##
+	s/\\/\\e/g;		# hide '\' as '\e'
+	s/'/\\'/g;		# hide ' as \'
+	s/^\./\&./g;		# '.' at the beginning of a line -> '\&.'
+	s/\n\./\n\&./g;		# '\n.' -> '\n\&.'
+
+	##
+	## Ignore stuff between @ignore / @end ignore,
+	##	@tex / @end tex
+	## 	@menu / @end menu
+	## 	@display / @end display
+	## 	@ifinfo / @end ifinfo
+	##      @ifset <ID> / @end <ID>		 (if <ID> has been @set)
+	##      @ifclear <ID> / @end <ID>	 (if <ID> has not been @set)
+	##
+	## If $eat is defined, and if that's our line, then undefine $eat, as
+	## we've gotten to the end of our meal.  Otherwise (if $eat is defined,
+	## but not our current line), we're to eat this, so just continue
+	## with the next line.
+	##
+	if (defined($eat)) {
+	    next if !/^\s*\@$eat\s*$/;
+	    undef($eat);
+	}
+	elsif (/^\s*\@tex\b/)		{ $eat = 'end tex'; next; }
+	elsif (/^\s*\@ignore\b/)	{ $eat = 'end ignore'; next; }
+	elsif (/^\s*\@iftex\b/)		{ $eat = 'end iftex'; next; }
+	elsif (/^\s*\@menu\b/)		{ $eat = 'end menu'; next; }
+	elsif (/^\s*\@display\b/)	{ $eat = 'end display'; next; }
+	elsif (/^\s*\@ifinfo\b/)	{ $eat = 'end ifinfo'; next; }
+	elsif (/^\s*\@ifset\s+(\S+)/ && !defined($set{$1}))
+	    				{ $eat = 'end ifset'; next; }
+	elsif (/^\s*\@ifclear\s+(\S+)/ && defined($set{$1}))
+	    				{ $eat = 'end ifclear'; next; }
+
+	## note a "@set <ID>"
+	if (/^\s*\@set\s+(\S+)/) {
+	    $set{$1} = 1 if !defined($notouch{$1});
+	    next;
+	}
+
+	## note an "@clear <ID>"
+	if (/^\s*\@clear\s+(\S+)/) {
+	    undef($set{$1}) if !defined($notouch{$1});
+	    next;
+	}
+
+
+	##
+	## If there's an include, process it.
+	## The include will be skipped if it's being eaten by the above,
+	## bit will not be skipped if being omitted below.
+	## (i.e. precedence is
+	##		@ignore / @end ignore (et.al)		highest
+	##		@include				  ..
+	##		@chapter  (et.al) omitted		lowest
+	##
+	if (/^\s*\@include\s+(.+)\s*/)
+	{
+	    warn qq/Including "$1" from "$file" line $..\n/
+		if defined($verbose);
+	    &processfile($history.qq/\t...included from "$file" line $.\n/,$1);
+	    next;
+	}
+
+	undef($level);
+	if (m/^\s*\@(heading|ichapter|chapter|appendix|unnumbered)\s+(.*\S)/) {
+	    $level = 0;
+	    $kind = $1;
+	    $title = $2;
+	} elsif (m/^\s*\@(unnumberedsec|section|appendixsec)\s+(.*\S)/) {
+	    $level = 1;
+	    $kind = $1;
+	    $title = $2;
+	} elsif (m/^\s*\@(appendixsubsec|subsection)\s+(.*\S)/) {
+	    $level = 2;
+	    $kind = $1;
+	    $title = $2;
+	} elsif (m/^\s*\@(appendixsubsubsec|subsubsection)\s+(.*\S)/) {
+	    $level = 3;
+	    $kind = $1;
+	    $title = $2;
+	}
+
+	if (defined($level) &&
+	  (defined(@omit) || defined($verbose) || defined($toc))) {
+	    ##
+	    ## Must do some rudamentary processing on the title.
+	    ## 
+	
+            $title =~ s/\\`/`/g;  ## open quote (`)
+            $title =~ s/\\'/'/g;  ## close quote (')
+	    1 while $title =~ s/\@[a-zA-Z]+{([^{}]*)}/$1/; ## remove @-codes
+	
+	    if (defined(@omit)) {
+		undef($omitlevel) if defined($omitlevel) && ($level <= $omitlevel);
+		local($tmp) = $title;
+		$tmp =~ s/\s+/ /g;     ## Squeze extra whitespace.
+		$tmp =~ s/[^\w ]//g;   ## Only letters and spaces.
+		foreach $pattern (@omit) {
+		    if ($tmp =~ m/^$pattern$/i) {
+			$omitlevel = $level if
+			    !defined($omitlevel) || ($omitlevel > $level);
+			last;
+		    }
+		}
+	    }
+	    local($omitted) = defined($omitlevel) ? " (omitted)" : "";
+
+	    print "  ". "   " x $level . "$title$omitted\n" if defined($toc);
+	    print STDERR "$kind: $title$omitted\n" if defined($verbose);
+	}
+
+	##
+	## If we're omitting this part, or if all we're doing is a
+	## table of contents, just continue.
+	##
+	next if defined($omitlevel) || defined($toc);
+
+	if (m/^\s*\@titlepage\b/) {
+	    $in_titlepage = 1;
+	    next;
+	}
+
+	if (m/^\s*\@end\s+titlepage\b.*/) {
+	    undef($in_titlepage);
+	    undef($eat_titlepage);
+    	    print ".if t .fo ''%''\n";	# Page numbered footers for troff.
+    	    print ".if t .pn 1\n";	# Next page is #1.
+	}
+
+	if (defined($in_titlepage) && defined($short_titlepage)) {
+	    $eat_titlepage = 1 if m/^\s*\@page\s*$/;
+	    next if defined($eat_titlepage);
+	}
+
+	##
+	## Skip comment lines
+	##
+	next if /^\s*\@c(omment)?\b/;
+
+	##
+	## If this is the end of anything, note that we must eat newlines.
+	##
+	$eatnewlines = 1 if /^\s*\@end\b/;
+
+	##
+	## If at the end of a quote, end it in nroff as well.
+	##
+	if (s/^\s*\@end\s+(quotation)\b.*/.lp/)
+	{
+	    print ".)q\n";
+	    next;
+	}
+
+	##
+	## At the end of some things (itimized lists and tables),
+	## start a new paragraph.
+	##
+	if (s/^\s*\@end\s+(enumerate|alphaenumerate|itemize|ftable|table)\b.*/.lp/)
+	{
+	    if (--$listdepth < 0)
+	    {
+		    warn "bad nesting. ($+) on line $..";
+		    $listdepth = 0;
+	    }
+	    print ".ba $listdepth)*\\n(piu\n";
+	}
+
+	##
+	## If this is the end of an example, reset the font back to
+	## normal, begin filling text again, and start a new paragraph.
+	##
+	$nofill = 0
+	    if (s/^\s*\@end\s+(small)?example\b.*/.fi\n.in -0.5i\n.ft R\n.lp/);
+
+	##
+	## If we're at the end of a group,
+	## Put the closing .)l
+	##
+	s/^\s*\@end\s+group\b.*/.)l/;
+
+	##
+	## If any of the following, just skip.
+	## Because any line beginning with "@end" is skipped, those ones
+	## that we do care about must be take care of above (and converted
+	## to not begin with "@end" so they won't be skipped).
+	##
+	next if /^\s*\\einput\b/;	## "\input" becomes "\einput" above
+	exit if /^\s*\@bye\s*$/;
+	next if /^\s*\@cindex\b/;
+	next if /^\s*\@\w*contents\b/;
+	next if /^\s*\@end\b/;
+	next if /^\s*\@findex\b/;
+	next if /^\s*\@headings\b/;
+	next if /^\s*\@ifclear\b/;
+	next if /^\s*\@ifset\b/;
+	next if /^\s*\@iftex\b/;
+	next if /^\s*\@kindex\b/;
+	next if /^\s*\@node\b/;
+	next if /^\s*\@noindent\b/;
+	next if /^\s*\@printindex\b/;
+	next if /^\s*\@settitle\b/;
+	next if /^\s*\@setfilename\b/;
+	next if /^\s*\@summarycontents\b/;
+	next if /^\s*\@synindex\b/;
+	next if /^\s*\@syncodeindex\b/;
+	next if /^\s*\@setchapternewpage\b/;
+	next if /^\s*\@vskip\b/;
+	next if /^\s*\@vindex\b/;
+
+	##
+	## Quotations are set as per the -me macro.
+	##
+	if (/^\s*\@quotation\b/)
+	{
+	    print ".(q\n";
+	    next;
+	}
+
+	##
+	## Enumeration lists are 1, 2, 3,...
+	##
+	if (/^\s*\@enumerate\b/)
+	{
+	    $listitem[++$listdepth] = "1";
+	    print ".ba $listdepth*\\n(piu\n";
+	    $increment[$listdepth] = ".";
+	    next;
+	}
+
+	##
+	## Alphaenumeration lists are A, B, C,...
+	##
+	if (/^\s*\@alphaenumerate\b/)
+	{
+	    $listitem[++$listdepth] = "a";
+	    print ".ba $listdepth*\\n(piu\n";
+	    $increment[$listdepth] = ".";
+	    next;
+	}
+
+	##
+	##
+	if (/^\s*\@itemize\s+(.*)\s*/)
+	{
+	    $listitem[++$listdepth] = "$1";
+	    print ".ba $listdepth*\\n(piu\n";
+	    $increment[$listdepth] = "";
+	    next;
+	}
+
+	##
+	## Tables generally supply their own item.
+	## We'll supply a default of '\bu'.
+	##
+	if (/^\s*\@f?table\b/)
+	{
+	    $listitem[++$listdepth] = '\\bu';
+	    print ".ba $listdepth*\\n(piu\n";
+	    $increment[$listdepth] = "";
+	    next;
+	}
+
+	##
+	## Take care of continuing lines. We need to continue a line
+	## if we have someting like "@code{foo}" broken across a line,
+	## with the open brace on one line and the close on another.
+	##
+	## We'll detect this by counting the number of braces
+	## ("tr/{/{/" will count the open braces)    #}}
+	##
+	## Also, make sure we don't have any stray brackets.
+	##
+	s/\@\@/<.at.symbol.>/g;  	## @@: '@' character
+	s/\@{/<.open.curley.>/g;	## @{: open curley bracket ({)
+	s/\@}/<.close.curley.>/g;	## @}: close curley bracket (})
+	while ((tr/{/{/ != tr/}/}/) && ($new = <INPUT>))
+	{
+		$new =~ s/\@{/<.open.curley.>/g;
+		$new =~ s/\@}/<.close.curley.>/g;
+		$_ .= $new;
+	}
+
+	##
+	## There are various non-bracket cods.
+	## Take care of those up front.
+	##
+	s/\@c\b/\\(co/g;   ## @c: copyright
+	s/\@`/`/g;   	   ## @`: open quote (`)
+	s/\@'/'/g;	   ## @': close quote (')
+	s/\@ /\ /g;	   ## @ : space-sized character (i.e. a Real space)
+	s/\@\*/\n.br\n/g;  ## @*: force a line break.
+	s/\@\./\\./g;	   ## @.: end-of-sentence period (nothing special).
+	s/\@refill\b//g;   ## @refill: just get rid of.
+	s/\@:/:/g;         ## @:: simple colon.
+
+	##
+	## If we're starting an example, go to the teletype font
+	## and stop filling text.
+	$nofill = 1 if s/^(\n?)\s*\@(small)?example\b/$1.nf\n.ft $T\n.in +0.5i/;
+
+#	## put suppress-hyphenation code before words with a hyphen.
+#	s/(\w*-\w+)/\\%$1/g;
+
+	##
+	## A number of other beginning-of-line changes can be made.
+	##
+	$eatnewlines = 1 if
+	  ##
+	  ## If a major section heading, start a new paragraph and
+	  ## start eating newlines.
+	     s/^\s*\@(heading|ichapter|chapter|appendix)\s+(.*)/.br\n\n.sh 1 "$2"\n.lp/
+	  || s/^\s*\@(unnumbered|unnumberedsec)\s+(.*)/.br\n.uh "$2"\n.lp/
+	  || s/^\s*\@(appendixsec|section)\s+(.*)/.br\n.sh 2 "$2"\n.lp/
+	  || s/^\s*\@(appendixsubsec|subsection)\s+(.*)/.br\n.sh 3 "$2"\n.lp/
+	  || s/^\s*\@(appendixsubsubsec|subsubsection)\s+(.*)/.br\n.sh 4 "$2"\n.lp/
+	  ##
+	  ## @deffn <tag> <stuff>
+	  ## (don't really know what @deffn is).
+	  ## Remove tag....
+	  ##
+	  || s/^\s*\@deffn\s+\S+\s+(.+)\s*$/.br\n\@code{$1}\n.br\n.sp 1\n/
+	  ##
+	  ## @defvar and @defun
+	  ##
+#	  || s/^\s*\@(defva?r|defun)\s*{(.+)}(.*)\s*$/.br\n\n\@code{$2$3}\n.br\n/
+#	  || s/^\s*\@(defva?r|defun)\s*(\S+)\s+(.*)\s*$/.br\n\n\@code{$2$3}\n.br\n/
+#	  || s/^\s*\@(defva?r|defun)\s+(.+)\s*$/.br\n\@code{$2}\n.br\n/
+	  || s/^\s*\@(defva?r|defun)\s*{(.+)}(.*)\s*$/.ip "\@code{$2$3}"\n/
+	  || s/^\s*\@(defva?r|defun)\s*(\S+)\s+(.*)\s*$/.ip "\@code{$2$3}"\n/
+	  || s/^\s*\@(defva?r|defun)\s+(.+)\s*$/.ip "\@code{$2}"\n/
+	  ##
+	  ##
+	  ## An @item becomes an indented paragraph (.ip).
+	  ## If not given a tag, use a bullet '\(bu'.
+	  ##
+	  || s/^\s*\@itemx?\s+(.+)\s*$/.ip "\\f$B$1\\fP\ "\n/
+	  ##
+	  ## @group begins a .(l text .)l set
+	  ##
+	  || s/^\s*\@group\s*$/.(l\n/
+	  ##
+	  ## Translate
+	  ##	@sp -> .sp
+	  ##	@center -> .ce
+	  ##	@page -> .np
+	  ##	@br -> .br
+	  ## Pretty streightforward stuff.
+	  ##
+	  || s/^\s*\@sp\s+([0-9]+)\s*$/.sp $1\n/
+	  || s/^\s*\@page\s*$/.bp\n/
+	  || s/^\s*\@br\s*$/.br\n/
+	  || s/^\s*\@(center|title|subtitle|author)\s*{(.*)}\s*$/.ce 1\n$2\n/
+	  || s/^\s*\@(center|title|subtitle|author)\s*(.*)\s*$/.ce 1\n$2\n/
+	  ;
+
+	##
+	## This is to complex to include in the above expression.
+	## An @item (or @itemx) without a given tag becomes an indented
+	## paragraph with a default tag.
+	##
+	if (s/^\s*\@itemx?\s*$/.ip "$listitem[$listdepth]$increment[$listdepth]\ "\n/)
+	{
+	    ++$listitem[$listdepth] if ($increment[$listdepth] eq ".");
+	    $eatnewlines = 1;
+	}
+
+	##
+	## Some simple text substitutions.
+	##
+	s/\@dots{}/\\ \\.\\ \\.\\ \\.\\ /g;
+	s/\@equiv{}/\\(==/g;
+	s/\@bullet\b/\\(bu/g;
+	s/\@copyright{}//g;
+	s/\@minus{}/-/g;
+	s/\@expansion{}/\(->/g;
+	s/\@result{}/\(->/g;
+	s/\@TeX{}/TeX/g;
+
+	##
+	## We'll run through the following list of changes a few times,
+	## to make sure we get all the nested possibilities.
+	## If there are no more @'s in the line, nothing left to do here.
+	##
+	for ($tries = 4; /\@/ && $tries > 0; --$tries)
+	{
+	    ##
+	    ## Things to be removed...  @ref{...}, @xref{...}, etc.
+	    ## (try leaving reference name)
+	    s/\@(xref|ref){(.*)}/$1/g;
+	    s/\@(xref|ref){[^{}]*}//g;
+
+	    ##
+	    ## Text change codes
+	    ##
+	    while (/\@([a-zA-Z]+){[^{}]*}/ && defined($fontopen{$1}))
+	    {
+		s/\@($1){([^{}]*)}/$fontopen{$1}$2$fontclose{$1}/g;
+	    }
+
+	    ##
+	    ## Take care of footnotes.
+	    ##
+	    s/\@(footnote){([^{}]*)}([.,]?)\s*/\\**$3\n.(f\n\\**$2\n.)f\n/g;
+	}
+
+	##
+	## Any '@' now indicates we've missed something.
+	##
+	warn "Error in tex->troff converter,\nUnknown \@code: $_\n" if /\@/;
+
+	##
+	## Make sure no lines starts with a single quote (this is dangerous
+	## to troff).  A leading \& buffers this.
+	##
+	s/^(['`])/\\&$1/;
+	s/\n(['`])/\n\\&$1/;
+
+	## Remove any double newlines
+	s/\n\n/\n/g;
+
+	##
+	## Restore @{ @} and @@ as { } and @
+	##
+	s/<.open.curley.>/{/g;
+	s/<.close.curley.>/}/g;
+	s/<.at.symbol.>/\@/g;
+
+	$_ = &fix($_) if tr#\\#\\# > 2;
+	print;
+    }
+    close INPUT;
+  }
+}
+
+##
+## string = fix(string)
+##
+## In nroff, one can't have multiple levels of \fX...\fP,
+## so we must simulate it.
+##
+sub fix
+{
+    local($_) = @_;
+    local($i, $font);
+    local($lastfont) = 'P';
+    local(@stack) = ('P');
+
+    for ($i = index($_, '\f', 0); $i >= $[; $i = index($_, '\f', $i+2)) {
+	$font = substr($_, $i+2, 1);
+	if ($font ne 'P') {
+	    push(@stack, $font);
+	    substr($_, $i+=2, 1) = "P\\f$font" if ($lastfont ne 'P');
+	} else {
+	    warn "can't pop stack!" if $#stack < $[;
+	    pop(@stack);
+	    warn "no top-of-stack!" if $#stack < $[;
+	    if ($stack[$#stack] ne 'P') {
+		substr($_, $i+=2, 1) = "P\\f$stack[$#stack]";
+	    } else {
+		substr($_, $i+2, 1) = $stack[$#stack];
+	    }
+	    $font = $stack[$#stack]; ## so lastfont will be set.
+	}
+	$lastfont = $font;
+    }
+    warn "stack is [@stack]" if $#stack != $[;
+
+    s/\\f[0123]\\fP//g; ## remove empty font settings.
+#   s/(\\f[0123])(\\f[0123])/$1\\fP$2/g;## don't put two named changes together.
+
+    $_; ## return the new line.
+}
+##############################################################################
+__END__
+.00;			# finish .ig
+ 
+'di			\" finish diversion--previous line must be blank
+.nr nl 0-1		\" fake up transition to first page again
+.nr % 0			\" start at page 1
+.\"____________________________NORMAL_MAN_PAGE_BELOW_________________
+.TH texi2troff 1 "July 1991"
+.SH TEXI2TROFF
+texi2troff \- convert GNU `.texi' files to troff (-me) format.
+.SH SYNOPSIS
+texi2troff [options] [file.texi ...]
+.SH DESCRIPTION
+.I Texi2troff
+converts Gnu `.texi' (TeX using Gnu's standard ``texinfo.tex'') files
+to troff files suitable for viewing with ``troff -me'' (or nroff as well).
+Input is from
+the named files (or stdin if none) and output is to stdout.
+.PP
+Alternatively, one may produce only a table of contents with the `-c' flag,
+which may then be used to create a custom configuration file used to
+produce a manual containing only desired sections.
+.SH OPTIONS
+.TP
+.B \-v
+Print a message to stderr for each file inclusion (via the @include texi
+command). Also print a message when a new section is processed.
+.TP
+.B \-s
+Produces a short titlepage.  If the document's title (stuff between
+``@titlepage'' and ``@end titlepage'') is more than one page, ``\-s''
+will squash all but the first page.
+.TP
+.BI \-D <sym>
+Pre-define (@set) the given symbol. If the symbol ``INTERNALS'' is set
+in ``gcc.texi'', for example, the manual produced will cover not only
+the usage of gcc, but the internal construction of the code as well.
+One can ensure getting this in
+.BR texi2troff \'s
+output by using ``-DINTERNALS''. 
+
+Changes to the symbol within the
+input will the be ignored.
+.TP
+.BI \-U <sym>
+Opposite of
+.BR ``\-D'' ,
+undefines the symbol.  Current versions of ``gcc.texi'' have ``INTERNALS''
+defined by default, so one would want to use ``-UINTERNALS'' to get only
+the user manual.
+.TP
+.BR \-f <file>
+Include lines of
+.I <file>
+as command-line options.  Lines beginning with '-' (leading whitespace ignored)
+are included; other lines ignored.  This can be used to create a tailored
+customization file, particularly with ``-D'', ``-U'', and ``-o''.
+.TP
+.BR \-o <title>
+Omits the section (and all subsections) with the named
+.IR <title> .
+The
+.I <title>
+must be part of the same argument as the ``-o'', and must have whitespace
+as appropriate. Therefore, one must generally make sure to enclose the whole
+thing in quotes if actually providing this flag on the command-line (as
+opposed to using it in a file included via ``-f'').
+
+For example, to omit the section in the Gcc manual ``Installing GNU CC''
+and all subsections, one would use
+.nf
+
+	"-oInstalling GNU CC"
+.fi
+
+The check of the argument against the titles in the input stream is somewhat
+fuzzy: leading and trailing whitespaces is ignored, any whitespace matches
+any whitespace, case of letters is ignored, and only letters, numbers, and
+whitespace are considered.
+.TP
+.B \-T
+Use the TT font rather than bold for code. This is not done by default
+as most nroff/troff processors can't handle the TT font when the other
+fonts (R, B, and I) are used as well.
+.SH USAGE
+This example shows how one might produce a customized version of the
+gcc manual.  We'll assume that the source for gcc is in ``src'', and hence
+the gcc manual is ``src/gcc.texi''.
+.PP
+The first step would be to inspect the top of ``src/gcc.texi'' to see if
+there are any ``@set'' or ``@clear'' commands which look to govern what
+kind of manual is to be produced.  In the current version, there is a line
+.nf
+
+    @set INTERNALS
+
+.fi
+If ``INTERNALS'' is
+.I not
+set, information about the internal workings of gcc will be omited, and a
+simple user manual will be produced.  We want just that, so we'll
+use ``-UINTERNALS''.
+.PP
+We'll then produce a Table of Contents (toc) of the complete manual:
+.nf
+
+    texi2troff -vc -UINTERNALS src/gcc.texi > gcc.toc
+
+.fi
+Our toc now looks something like:
+.nf
+
+  GNU GENERAL PUBLIC LICENSE
+     Preamble
+     How to Apply These Terms to Your New Programs
+  Contributors to GNU CC
+  Protect Your Freedom---Fight ``Look And Feel''
+  GNU CC Command Options
+     Option Summary
+     Options Controlling the Kind of Output
+	.
+	.
+	.
+     Specifying Target Machine and Compiler Version
+     Specifying Hardware Models and Configurations
+        M680x0 Options
+        VAX Options
+        SPARC Options
+        Convex Options
+        AMD29K Options
+	    .
+	    .
+	    .
+
+.fi
+We'll now convert our toc into a configuration file (to be used with ``-f'').
+We'll put the ``-UINTERNALS'' at the top, and put ``-o'' in front of
+section names that we'll not want.  It now looks like:
+.nf
+
+-UINTERNALS
+-oGNU GENERAL PUBLIC LICENSE
+     Preamble
+     How to Apply These Terms to Your New Programs
+-oContributors to GNU CC
+-oProtect Your Freedom---Fight ``Look And Feel''
+  GNU CC Command Options
+     Option Summary
+     Options Controlling the Kind of Output
+        .
+        .
+        .
+     Specifying Target Machine and Compiler Version
+     Specifying Hardware Models and Configurations
+        M680x0 Options
+-o      VAX Options
+-o      SPARC Options
+        M88K Options
+-o      Convex Options
+-o      AMD29K Options
+            .
+            .
+            .
+
+.fi
+Note that because we omitted  ``GNU  GENERAL PUBLIC LICENSE'', the
+subsections (``Preamble'' and ``How to...'') are also omitted.
+Putting a ``-o'' in front of the omitted subsection names wouldn't change
+anything, but wouldn't hurt.
+.PP
+We can now produce our troff/nroff source with
+.nf
+
+	texi2troff -vfgcc.toc src/gcc.texi > man.me
+	nroff -me man.me > gcc.manual.text
+.fi
+.SH BUGS
+I don't know TeX or texi... just figured out what I needed to know
+from looking at the files.  Other texi files may have constructs
+that I haven't considered.
+
+Should be able to produce -man format as well.
+.SH AUTHOR
+Jeffrey Friedl, Omron Corp (jfriedl@omron.co.jp)

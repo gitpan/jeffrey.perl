@@ -1,0 +1,472 @@
+.ll 79n
+.TH readline perl "March 9, 1993"
+.SH "PERL READLINE"
+This manual describes the perl
+.I readline
+library
+(version 930306.007)
+from a user's point of view.
+It has perhaps been included along with a perl program that uses this
+library. Use of readline's advanced features can help you get the most
+out of programs that incorporate it.
+.SH "GNU READLINE"
+The perl readline package is similar to GNU's, and to the casual user they
+might seem identical. If you are already familiar with GNU's readline package,
+you may need only to skim this manual.
+.SH "OVERALL DESCRIPTION"
+The
+.I readline
+package allows one to use cursor-movement and editing commands during
+interactive line input to a program.
+.PP
+If, for example, you have just
+typed a long line of input and you notice a mistake near the beginning
+of the line, you can use readline commands to fix the mistake, rather
+than cumbersumly erasing and retyping the whole line.
+.PP
+Another benefit is that
+.I readline
+remembers previously-typed lines (these are called the "history" lines).
+If you want your next input line to be
+the same as (or closely resemble) a previous line, you can recall that
+line, perhaps edit it or add to it (or both),
+and enter it as input to the program.
+.SH "KEY BINDING"
+Readline has a default idea about what key sequences cause what to happen.
+You can change these to suit your taste (see the "INPUTRC FILE" section).
+In describing the possible commands below, the command name and the default
+key sequence will be shown in parenthesis.  Sometimes different key
+sequences will bind to the same command ('\er' and '\en' to accept-line, for
+example).
+.PP
+In showing the key sequences, the following notations are used:
+.nf
+
+     M-x    to indicate Meta-x (usually the ESC key followed by x)
+     C-x    to indicate Ctrl-x
+     M-C-x  to indicate Meta-Ctrl-x
+     x      simple char x
+
+.fi
+where 'x' above can be a single character, or the special:
+.nf
+
+     special    means
+     -------    -----
+     TAB        tab     (\et)
+     DEL        delete  (0x7f)
+     NEWLINE    newline (\en)
+     RETURN     return  (\er)
+     ESC        escape  (\ee)
+     SPACE      space   ( )
+
+.fi
+So, for example, the notation "C-d" means "control-d", while "M-d" would
+be the ESC key followed by the "d" key.
+.SH "NUMERIC ARGUMENTS"
+Many readline commands can be told to do its job multiple times.
+This is usually done by "Meta-number-command". If, for example, the
+key sequence "C-f" moves your cursor one character forward, the
+sequence "M-13C-f" would move it thirteen characters.
+This is called the "numeric argument" to a command.
+
+In the interest of brevity
+in the command descriptions below, the action of the numeric argument
+won't be mentioned if it "does the right thing".
+.SH "CURSOR MOVEMENTS"
+Once you have some text typed in, you can use the cursor-movement commands
+to move your cursor position along the line.
+.TP
+.B "forward-char (C-f)"
+Moves the cursor one character to the right.
+.TP
+.B "backward-char (C-b)"
+Moves the cursor one character to the left.
+.TP
+.B "forward-word  (M-f)"
+Moves to just beyond the end of the word that the cursor is on
+(or next word if not on a word).
+.TP
+.B "backward-word  (M-b)"
+Moves to the beginning of the word that the cursor is on (or to the
+beginning of the previous word if not on a word).
+.TP
+.B "beginning-of-line  (C-a)"
+Moves to the beginning of the line.
+.TP
+.B "end-of-line  (C-e)"
+Moves to the end of the line.
+.SH "COMMANDS TO REMOVE TEXT"
+Commands that remove text either "kill" the text or "delete" the text.
+If it is "killed", it is saved in a
+.I "kill buffer"
+and can later be
+recovered.  Successive commands that kill text are additive (i.e. the killed
+text accumulates in the kill buffer).
+.TP
+.B "delete-char  (C-d)"
+Deletes the character under the cursor (if the numeric argument is greater
+than one, the characters are killed).
+If the line is empty and the previous command was not
+.BR "delete-char" ,
+EOF is input.
+.TP
+.B "backward-delete-char  (C-h, DEL)"
+Removes the character to the left of the cursor.
+.TP
+.B "kill-word  (M-d)"
+Kills the next word after the cursor.
+.TP
+.B "backward-kill-word  (M-DEL)"
+Kills the word before the cursor.
+.TP
+.B "unix-word-rubout  (C-w)"
+Like
+.B backward-kill-word
+but the idea about where a word begins and ends is of the traditional
+unix flavor (i.e. whitespace).
+.TP
+.B "kill-line  (C-k)"
+Kills the line from the cursor to the end-of-line.
+.TP
+.B "unix-line-discard  (C-u)"
+Kills the line from the cursor to the beginning-of-line.
+.SH "COMMANDS TO ADD TEXT"
+.TP
+.B "self-insert (all printing characters)
+This is how most regular keys are bound.
+Any key that is bound to
+.B "self-insert"
+will just be added to the line at the cursor's position.
+.TP
+.B "tab-insert (M-TAB)"
+Inserts a tab character at the cursor's position.
+.TP
+.B "quoted-insert  (C-q, C-v)"
+The next character typed is inserted verbatim.
+.TP
+.B "yank  (C-y)"
+The text in the
+.I "kill buffer"
+is inserted at the cursor's position.
+.SH "COMMANDS TO ACCESS THE HISTORY LINES"
+.TP
+.B "previous-history  (C-p)"
+Replace the current input line with the previous (older) line saved in
+the history list.
+.TP
+.B "next-history  (C-n)"
+Replace the current input line with the next (more recent) line saved in
+the history list. Of course, can only be done sometime after
+.B "previous-history"
+has been done.
+.TP
+.B "beginning-of-history  (M-<)"
+Replace the current line with the first (oldest) line in the history
+list.
+.TP
+.B "end-of-history  (M->)"
+Replace the current line with the last (most recent) line in the history
+list.
+.TP
+.B "reverse-search-history  (C-r)"
+Perform a search backward (through older lines) through the history list.
+Once you type the command (default "C-S") for
+.BR forward-search-history ,
+you then type what you want to search for. As you type, the first line
+in the search that matches what you've typed is continually updated.
+
+At any time, you can enter the commands for
+.B forward-search-history
+and
+.B reverse-search-history
+to move to the next/previous history line that matches.
+
+Entering
+.B "C-g"
+aborts the search, restoring the input line to what it was before the
+search began.
+
+Hitting ESC, or any other command, causes the search to end, leaving
+as the input line whatever it was at the time.
+.TP
+.B "forward-search-history  (C-s)"
+Like above, but start searching forward.
+.SH "COMMANDS THAT UNDO CHANGES"
+.TP
+.B "revert-line  (M-R)"
+If you've selected a history line with one of the above commands and then
+proceeded to make changes, you can use
+.B "revert-line"
+to restore the original history line.
+
+If you weren't on such a history line, but
+there had been "pre-typed" input (see the section on this below),
+that input is restored.
+.TP
+.B "undo  (C-_)"
+A copy of the current input line is saved each time it is changed.
+You can step back through the changes, progressively restoring the line
+to its original state with this command.
+.SH "COMMANDS THAT MODIFY TEXT"
+.TP
+.B "transpose-chars  (C-t)"
+The two characters at and just before the cursor are switched.
+.TP
+.B "down-case-word  (M-l)"
+The word after the cursor is changed to all lowercase.
+.TP
+.B "upcase-word  (M-u)"
+The word after the cursor is changed to all uppercase.
+.TP
+.B "capitalize-word  (M-c)"
+The word after the cursor is capitalized (first char upcased, rest downcased).
+.SH "COMMANDS THAT DO COMMAND COMPLETION"
+.TP
+.B "complete (TAB)"
+Invoking this command while the cursor is at the end of a word causes
+the the program to try to "complete" what it thinks you might have been
+typing.  How good it is at this is program-dependent.
+
+The default completion action of
+.I readline
+if the invoking program does not provide more detailed information is to
+try to complete filenames.
+
+Readline will type for you that part of all possible matches which is
+unambiguous with what you've typed so far.  If what you've typed so far
+can only match one item, the entire item is completed for you, and a trailing
+space is added as well.
+
+If the
+.B complete
+command is given twice in a row, the work done is dependent upon the
+.I TcshCompleteMode
+variable (see the INPUTRC section for information on variables).
+If
+.I TcshCompleteMode
+is off (the default), subsequent successive
+.B complete
+invocations cause the
+.B possible-completions
+command to be done. 
+If
+.I TcshCompleteMode
+is on, subsequent successive
+.B complete
+invocations cause the possible alternatives to be cycled through.
+.TP
+.B "possible-completions (M-?)"
+List items that might match the word before the cursor.
+.SH "MISC COMMANDS"
+.TP
+.B "digit-argument  (M-0, M-1, M-2...)"
+Not usually rebound, meta followed by digits sets up an argument count for
+the next command. If the first such "digit" is "M--" ("Meta-minus"), the
+argument count is negative.
+.TP
+.B "universal-argument  (no default)"
+Multiplies the argument count (for the next command) by four.
+Many people rebind this to "C-u" (see the INITRC section below).
+.TP
+.B "do-lowercase-version  (M-A, M-B, M-C, ...)"
+All Meta-uppercase characters are bound to this command. They will do
+whatever their lowercase version will do. Therefore, "M-A" will do whatever
+"M-a" does, "M-B" whatever "M-b" does, etc.  OF course, they may be rebound
+to do different things if you like.
+.TP
+.B "abort  (C-g, M-C-g)"
+Clear the line and start over with this input line.
+The safe "helpgetmeouttahere" key.
+.TP
+.B "interrupt  (C-c)"
+Send an interrupt to the program.
+.TP
+.B "suspend  (C-z)"
+Suspend the program (if possible).
+.TP
+.B "accept-line (NEWLINE, RETURN)"
+Pass the line, as it stands, to the program.
+The location of the cursor on the line is irrelevant... the entire line
+is returned to the program.
+.TP
+.B "clear-screen  (C-l)"
+The screen is cleared (if possible) and the line redrawn.
+If a numeric argument more than one is given, only the line is redrawn.
+.TP
+.B "redraw-current-line (no default binding)"
+The line is redrawn (refreshed).
+.TP
+.B "re-read-init-file  (C-x)"
+Causes the "~/.inputrc" to be re-read. This can be used, for example,
+if changes have been made to it in another window and you would like those
+changes reflected in the current program.  See the INPUTRC section below.
+.TP
+.B "ding  (various)"
+Just rings the bell. Often bound to indicate the key sequence is not valid.
+.SH "PRE-TYPED DEFAULT INPUT"
+Some programs that use the readline package may, at times, offer "pre-typed"
+input for you, as a kind of "default selection". It will appear on the line
+after the prompt when the prompt first appears, as if you had typed it
+yourself.  If the "pre-typed" input is as you like it, you can simply
+hit
+.B return
+to enter it (again, as if you had typed it).
+But like any input you have typed, you can edit it as you like,
+or delete it completely and enter an input line from scratch.
+.SH "CUSTOMIZING - THE INPUTRC FILE"
+.I Readline
+is customized via the "~/.inputrc" file. All programs that use the
+readline library will read initialization commands from this file each
+time the program is started (and when the
+.B re-read-init-file
+command is given). There are four kinds of lines in an inputrc file:
+.PP
+Lines beginning with '#' are taken to be comments and ignored.
+.PP
+Key-binding lines are how you tell the package that you would like
+certain commands associated with certain key sequences. The general form
+of a key-binding line is:
+.nf
+	sequence: command-name
+.fi
+The possible
+.I "command-names"
+are listed in this manual (\fBforward-character\FP, etc.).
+.PP
+There are two ways to specify a key sequence.  The old-style way is
+As was described in the KEY BINDING section above. With this method, only
+one character (or ESC + one character) sequences can be given.
+.PP
+With the new-style method, the
+.I sequence
+is enclosed in double-quotes.  Each character in the
+sequence string stands for itself except the special sequences
+.nf
+       \eC-x         Ctrl-x
+       \eM-x         Meta-x
+       \eM-C-x       Meta-Ctrl-x
+       \e\e          escape.
+       \ex           x (if not one of the above)
+.fi
+So, for example, the following line in one's .inputrc would bind the
+standard vt100/xterm arrow keys:
+.nf
+    "\ee[[A": previous-history
+    "\ee[[B": next-history
+    "\ee[[C": forward-char
+    "\ee[[D": backward-char
+.fi
+In fact, these bindings aren't required in .inputrc, as they are active
+by default. Of course, you can override them in your .inputrc if you wish.
+.PP
+Lines of the form
+.nf
+    set \fIvarname\fI \fIvalue\fP
+.fi
+set a
+.I readline
+variable. Most of the GNU readline variables are not yet supported.
+The variables and possible values (with the default given first)
+currently understood by are:
+.TP
+.B "TcshCompleteMode (off/on)"
+See COMMANDS THAT DO COMMAND COMPLETION above.
+.TP
+.B "CompleteAddsuffix (on/off)"
+When using the internal filename completion routine, certain characters
+are appended to some filenames a'la "ls -F". If the file is a symbolic link,
+"@" is appended. "/" is appended to directory name, while "*" to executables.
+"=" is appended to sockets or pipes.
+.TP
+.B HorizontalScrollMode (on/off)
+Only
+.I on
+currently works.
+.B EditingMode (emacs/vi)
+Only
+.I emacs
+currently works
+.B MarkModifiedLines (off/on)
+Only
+.I off
+currently works.
+.B PreferVisibleBell (off/on)
+Only
+.I off
+currently works.
+.PP
+In addition to the above variables, each program may define their own.
+.PP
+The final kind of line in an .inputrc file is an $if/$else/$endif directive.
+This is a primitive way to tailor your .inputrc to different programs
+and terminals.  Lines between "$if \fIcondition\fP" and "$endif" are ignored
+if the condition is not true.
+.PP
+The
+.I condition
+aspect if very primitive (thank GNU). If
+.I condition
+is of the form "term=\fIvalue\fP", it is true if the current terminal
+(\fITERM\fP environmental variable) is \fIvalue\fP.
+If not of that form, the
+.I condition
+is true if it is the same as
+the name of the invoking program.  For this perl readline,
+.I condition
+is always true if it is "perl".
+.PP
+Here is an example .inputrc file (indented to stand out):
+.nf
+    # perl readline has a cool tcsh mode... use it.
+    $if perl
+      set tcsh-complete-mode On
+    $endif
+    C-U: universal-argument
+    M-r: redraw-current-line
+    M-R: revert-line
+    C-l: possible-completions
+    M-u: undo
+    $if term=sun
+     # The following are Sun console function keys F1 and F2
+     "\ee[OP": complete
+     "\ee[OQ": possible-completions
+    $else
+     # The following are vt100/xterm/others function keys F1 and F2
+     "\ee[11~": complete
+     "\ee[12~": possible-completions
+    $endif
+
+    # special per-program stuff
+    $if emacs
+     C-h: backward-delete-char
+     DEL: backward-kill-word
+    $endif
+    $if myprog
+     set myprog-mode myprog-favorite-mode
+    $endif
+.fi
+.PP
+Note that while the perl readline package allows random whitespace
+at the start of each line; the GNU package does not (so be careful).
+.SH "ENHANCEMENTS OVER GNU READLINE"
+.nf
+In perl!
+Better if/endif error reporting in .inputrc.
+Handles two-byte characters.
+Tcsh-style command-completion.
+Has Suspend and Interrupt functions.
+.fi
+.SH "BUGS AND OTHER DIFFERENCES FROM GNU READLINE"
+.nf
+No vi editmode (is this a bug? :-)
+HorizontalScrollMode always on.
+MarkModifiedLines always off.
+PreferVisibleBell always off.
+Not implemented: TransposeWords, YankPop, YankNthArg, macros.
+Assorted minor nits and differences.
+Kill buffer is only one level deep (not a ring).
+The searching has subtle differences.
+.fi
+.SH AUTHOR
+Jeffrey Friedl, Omron Corp (jfriedl@omron.co.jp)

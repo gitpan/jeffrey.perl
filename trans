@@ -1,0 +1,832 @@
+#!/usr/local/bin/perl -w
+## Should work with jperl or perl.
+
+##
+## Silly little text-augmenter.
+## 	Jeffrey Friedl (jfriedl@omron.co.jp)
+##	Omron Corp
+##	Mar 18 '94
+##
+$version = "960412.8";
+
+## 960412.8 -- adjusted stdout buffering to be more efficient.
+##
+## 951114.7 -- small fix to quiet perl5's -w
+##
+## 950712.6 -- small fix to quiet -w
+##
+## 950425.5 -- added -dic
+##
+## 950424.4 -- added -kana (idea via Kenton Green), -help, -min
+##             renamed "-len" to "-max".
+##             Redid way data handled during dictionary read -- should be
+##             much faster now (although still slow).
+
+##
+## BLURB:
+## Filter to augment Japanese text with appropriate entries from edict,
+## Jim Breen's Japanese/English dictionary (available in pub/nihongo
+## from ftp.cc.monash.edu.au). Works with jperl or perl. Nifty!
+##
+
+##>
+##
+## Input: file(s) with EUC Japanese.
+##        Implicit input is edict, et. al. via @dictionaries.
+## Output: to STDOUT, input folded to $fold_column columns, augmented with
+##        appropriate dictionary entries on a per-line basis.
+##        Also, the file "words.used" which indicates how often each used
+##	  dictionary entry was used.
+## Caution: Sucks up HUGE amounts of memory when used. *HUGE* amounts.
+##
+## Options:
+##	-sjis   Shift-JIS in the input converted to EUC
+##		(otherwise, EUC expected; JIS always OK).
+##
+##	-max##  Up to ## (replace with a number) characters taken into account
+##		when doing the search. Default is 8, which won't catch
+##		something like 食べさせられりすぎたかった (for which you'd
+##		have to use at least "-len13").
+##		
+##	-min##  Only consider kanji entries that are at least ## chars long
+##
+##	-names  Don't ignore name-only entries in the edict file.
+##
+##      -kana## Try to deal with kana-only entries. If a number is provided,
+##		deals only with kana entries that are at least that number of
+##		characters long (default 3).
+##
+## 		Using this flag more than doubles the amount of memory
+## 		needed, as kana-only entries are read from edict, as well
+## 		as reading-versions of each kanji entry being saved as
+## 		well.
+##
+##	-maxprint##
+##	-mp##
+##		Print an entry at most ## times (default 20). After that,
+##		it's elided from the transliteration printout.
+##
+##      -quiet  Suppresses the startup messages about how many lines
+##              have been read from edict.
+##
+##	-inter  Run interactively, accept lines at a "trans>" prompt.
+##		If the line begins with EUC text, pass through the
+##		"translator". If the line is in the form
+##			do filename
+##		Then FILENAME is translated to "FILENAME.out".
+##              Other interactive commands
+##                 width ##
+##                    sets the idea of the screen width (for folding) to ##
+##
+##                 marker
+##                    outputs a line the width of the screen.
+##
+##                 line: TEXT
+##                    translates TEXT
+##
+##                 trans [-] [##] ENDING
+##                    Accepts line until one with exactly whatever ENDING is
+##                    on it, and translates the lines. If the optional '-' is
+##                    given, a MARKER command is done first. If the optional
+##                    ## is given, the width is set to ## (as "width ##").
+##
+##     -noprompt
+##              Omits printing a prompt when interactive.
+##
+##     -limit##     
+##		Reads only ## lines in the dictionary... used during
+##		debugging to reduce startup times. Note that there is no
+##		space between the digits and the "-limit"
+##
+##     -dic DICT
+##		Sets the dictionary file to be read to the named file.
+##		Multiple files may be given with multiple uses of -dic.
+##
+## If no options and no filenames, does "-inter".
+##
+##<
+
+## Set to whatever list you want
+@dictionaries =  (
+     "$ENV{'HOME'}/lib/edict",  ## set to whatever file you  like;
+     ## can put other files here as well.
+);
+$orig_dictionaries = 1; ## @dictionaries is just the default (changed by -dic)
+
+$skipnames = 1; ## Default is to skip names
+$sjis = 0;      ## Default is to not convert from sjis
+$maxprint = 20; ## Write an entry up to this many times before just skipping it
+$minlen =  1*2; ## Deal with entries as short as 1 char (2 bytes) long.
+$maxlen =  8*2; ## Deal with entries as long as 8 chars (16 bytes) long.
+$minkanalen = 3*2; ## Deal with kana entries as short as 3 chars (6 bytes).
+$fold_column = 80; ## where to fold output lines.
+$char_start = 164; ## 164 is magic start of kana.
+$write = 0;
+$use = 0;
+
+$source_line_marker = "\xa2\xa1 ";
+$source_cont_marker = "\xa1\xfe ";
+$edict_line_marker  = "\xa2\xa8 ";
+
+while (@ARGV && $ARGV[0] =~ m/^-./) {
+    $arg = shift(@ARGV);
+    $write=1, next if $arg eq "-write";
+    $use=1, next if $arg eq "-use";
+
+    if ($arg =~ m/^-names?$/) {
+        $skipnames = 0;
+    } elsif ($arg eq '-quiet') {
+  	$quiet = 1;
+    } elsif ($arg =~ m/^-kana(\d*)$/) {
+  	$kana = 1;
+	$minkanalen = $1 * 2 if $1;
+    } elsif ($arg eq '-noprompt') {
+  	$noprompt = 1;
+    } elsif ($arg eq '-sjis') {
+	$sjis = 1;
+    } elsif ($arg =~ m/^-(max|len)(\d+)$/) {
+	$maxlen = $2 * 2;
+    } elsif ($arg =~ m/^-limit(\d+)$/) {
+	$limit= $1;
+    } elsif ($arg =~ m/^-inter(active)?$/) {
+	$interactive = 1;
+    } elsif ($arg =~ m/^-m(ax)?p(rint)?(\d*)$/) {
+	$maxprint = $3 ? $3 : 0;
+    } elsif ($arg eq '-dic') {
+	&usage(1, "expected arg to $arg\n") if @ARGV == 0;
+	local($file) = shift @ARGV;
+	die qq/$0: can\'t find "$file"\n/ unless -f $file;
+	@dictionaries = () if $orig_dictionaries; ## reset if first -dic
+	$orig_dictionaries = 0;
+	push(@dictionaries, $file);
+    } elsif ($arg eq '-help') {
+	&usage(0);
+    } else {
+	&usage(1, "unknown argument [$arg]\n");
+    }
+}
+
+sub usage {
+    local($exit, $message) = @_;
+    $min = $minlen / 2;    ## bytes->chars
+    $max = $maxlen / 2;    ## bytes->chars
+    $minkana = $minkanalen/2; ## bytes->chars
+    print STDERR $message if defined $message;
+    print STDERR <<END_OF_HELP;
+usage: %0 [flags] [files...]
+    -max##    -- consider entries up to ## chars long (default $max).
+    -min##    -- consider kanji entries with as few as ## chars (default $min).
+    -kana##   -- try kana-only transliterations. Optional minimum length
+                 may be given (default if '-kana' only is $minkana chars).
+    -names    -- don't ignore name-only entries
+    -sjis     -- input file is SJIS (default EUC; JIS always OK).
+    -quiet    -- no startup '% read' messages
+    -dic FILE -- use FILE as the dictionary (multiple '-dic' args OK).
+    -inter    -- make interactive (default if no files specified).
+    -noprompt -- don't prompt when interactive (useful for adding a front-end)
+    -maxprint##
+	      -- print an entry at most ## times (default is $maxprint).
+                 May be abbreviated to '-mp##'.
+END_OF_HELP
+    exit($exit) if defined $exit;
+}
+
+if (!defined $kana) {
+    $minkanalen = 0; ## 0 means "no kana"
+    $char_start = 176; ## magic start of kanji.
+}
+
+$interactive = 1 if @ARGV == 0;
+
+&do_conj_init;
+&read_dic(@dictionaries);
+
+if (0) {
+    foreach $len ($minlen..$maxlen) {
+	local(*w) = $symtab[$len];
+	print "$len: ", scalar(%w),  ":";
+	foreach $k (keys %w) {
+	    print "$k - ";
+	}
+	print "\n";
+    }
+}
+
+if (defined $interactive) {
+	&do_interactive;
+} else {
+	&do_file(@ARGV);
+}
+&write_count_info("words.used");
+exit(0);
+
+sub do_interactive
+{
+    while (1)
+    {
+	if (!defined($noprompt)) {
+	    local($|) = 1;
+	    print "trans> ";
+	}
+
+	last if !defined( $input = <STDIN> ); ## exit on no input
+	$input =~ s/^\s+//;   ## Lose leading whitespace.
+        $input =~ s/\s+$//;   ## Lose trailing whitespace.
+        last if $input eq ""; ## Exit on a blank line.
+
+	## HELP
+	if ($input =~ m/^\s*[?h](e(lp?)?)?\s*$/i)
+	{
+	    print<<"XXX";
+Commands are from among:
+  do FILE                  -- Process lines from the given file
+  line: TEXT               -- Process the given text
+  trans [-] [WIDTH] ENDING -- Accepts lines until exactly ENDING is given.
+                              If '-' given, does a 'marker' command first.
+                              If WIDTH given, sets the width of the screen.
+  width WIDTH              -- Sets the width of the screen.
+  marker                   -- Writes a rule line.
+  help/quit/exit
+XXX
+
+        ## QUIT, EXIT
+	} elsif ($input =~ m/^(q(uit)?|e(xit)?)$/i) {
+	    return;
+
+	## DO FILENAME -- run trans on named file.
+	} elsif ($input =~ m/^do\s+(\S+)$/) {
+	    local($file) = $1;
+	    if (!-f $file) {
+	      print qq/Can\'t find "$file".\n/;
+	    } else {
+	      local($fileout) = "$1.out";
+	      open(OUT, ">$fileout") || die qq/can\'t open "$fileout".\n/;
+	      select(OUT);
+	      &do_file($file);
+	      select(STDOUT);
+	    }
+
+        ## Set width of screen; Used for wrapping.
+	} elsif ($input =~ m/^width\s+(\d+)\s*$/) {
+	    $fold_column = $1;
+
+        ## Write a <HR>-like rule line across the width of the screen
+	} elsif ($input =~ m/^marker\s*$/) {
+	    print "\xa8\xa1" x int(($fold_column-1)/2), "\n";
+
+        ## TRANS [-] [###] ....japanese text....
+	## Run trans on the given Japanese text. Preceed the processing
+	## by a rule line if '-' used. Sets the width of the screen if
+	## [###] given.
+	} elsif ($input =~ m/^trans\s+(-\s+)?(\d+\s+)?(.*\S)\s*$/) {
+	    local($mark, $width, $end) = ($1, $2, $3);
+	    $fold_column = $width if defined($width);
+	    print "\xa8\xa1" x int(($fold_column-1)/2), "\n" if defined($mark);
+
+	    &flush_stdout;
+	    while (<STDIN>)
+	    {
+		chop;
+		last if $_ eq $end;
+		&do_line;
+	    }
+	    &flush_stdout;
+
+	## Just run trans on the given data
+	} elsif ($input =~ m/^line:\s*(.*)/) {
+	    $_ = $1;
+	    &do_line;
+
+	## If given encoded stuff directly, run trans on it.
+	} elsif (ord($input) >= 128) {
+	    $_ = $input;
+	    &do_line;
+
+	} elsif ($input !~ m/^\s*$/) {
+	    print "unknown command [$input]\n";
+	}
+
+	&flush_stdout;
+    }
+}
+
+sub flush_stdout
+{
+    local($|) = 1;
+    print '';
+}
+
+##
+## arguments are a list of files
+##
+sub do_file
+{
+    foreach $name (@_) 
+    {
+        open($name, $name) || die "can't open [$name]\n";
+	&process_file($name);
+    }
+}
+
+sub process_file
+{
+    local($fd) = @_;
+    while(<$fd>) {
+	chop;
+	&do_line;
+    }
+    close($fd);
+}
+
+##
+## Arguments are
+##   1) line to print
+##   2) string to prepend to line
+##   3) string to prepend to continuation lines.
+##
+sub output_line
+{
+    local($line, $lead, $fold) = @_;
+
+    local(@c) = $line =~ m/\(?\w+[,\)]?|[\x80-\xff].|./g;
+    local($next);
+    local($roomleft) = -1;
+    
+    while (@c)
+    {
+	if (length($c[0]) > $roomleft)
+	{
+	    if ($roomleft >= 0) { ## not first line
+		print "\n";
+		## don't lead a wrapped line with whitespace;
+		shift(@c) while @c && ($c[0] =~ m/^\s+$/);
+	    }
+	    print $lead;
+	    $roomleft = $fold_column - length($lead);
+	    $lead = $fold; ## subsequent lines have this instead;
+
+	}
+	$next = shift(@c);
+	print $next;
+	$roomleft -= length($next);
+    }
+    print "\n";
+}
+
+##
+## Does augmenting on $_.
+## Expect it to be chopped when it arrives.
+##
+sub do_line
+{
+    local($line) = $_;
+
+    ## SJIS->EUC if requested.
+    &line_sjis_to_jis($_) if $sjis;
+
+    ## JIS->EUC
+    s#\e(\$[\@B]|&\@\e\$B)(([^\e].)*)\e\([JB]#($x=$2)=~tr/\x00-\x7f/\x80-\xff/,$x#ge;
+
+    ## replace tabs with spaces.
+    substr($_, $i, 1) = ' ' x (8-$i%8) while ($i=index($_, "\t")) > 0;
+
+    print "\n";
+    ## Print original line
+    &output_line($line, $source_line_marker, $source_cont_marker);
+
+    undef %done; ## will be entries noted *this* line.
+
+    OUTER:
+    while ($linelen = length($line))
+    {
+	if (ord($line) >= $char_start)
+	{ 
+	    $len = ($maxlen > $linelen) ? ($linelen & ~1): $maxlen;
+	    while ($len >= $minlen) {
+		## don't bother checking if the last two bytes aren't JIS
+		if (ord(substr($line, $len-1,1)) >= 128) {
+		    #printf("checking <%s>\n", substr($line, 0, $len));
+	            next OUTER if &check(substr($line, 0, $len));
+		}
+		$len -= 2;
+	    }
+	}
+	## oh well, nibble first character.
+	substr($line, 0, ord($line) >= 128 ? 2 : 1) = '';
+    }
+    print "\n" if defined(%done); ## put blank line after dict. entries.
+}
+
+sub check
+{
+    local($word) = @_;
+    local($len) = length($word);
+    {
+      local(*w) = $symtab[$len];
+      $entries = $w{$word};
+    }
+
+    if (defined($entries))
+    {
+	## found WORD in dictionaries as ENTRIES
+	substr($line, 0, $len) = ''; ## nibble word from line.
+
+	$count{$word}++;
+	if (!defined($done{$word}) &&
+  	   ($maxprint == 0 || $count{$word} < $maxprint))
+	{
+	    ## Haven't printed on this line yet, and not printed too many times
+	    chop($entries);
+	    local($entry, @entry) = split(/\n/, $entries);
+	    &output_line($entry,
+		$edict_line_marker,
+		$edict_line_marker.(' 'x index($entry, "/")));
+	    if (@entry) {
+		local($head) = $entry =~ m/^((\S\S)+) / ? $1 : '';
+		foreach $entry (@entry) {
+		    substr($entry,0,length($head)) = ' ' x length($head);
+		    &output_line($entry,
+ 			$edict_line_marker,
+			$edict_line_marker.(' 'x index($entry,"/")));
+		}
+	    }
+	    $done{$word} = 1; ## note that we have printed for this text line.
+	}
+	return 1;
+    }
+    &do_conj($word);
+}
+
+##
+## Arguments are a list of file names in edict format.
+##
+sub read_dic
+{
+    if ($write || $use) {
+	## first, initialize array of symtab entries.
+	foreach $len ($minlen ..$maxlen) {
+	    next if $len & 1;
+	    unlink "w$len.dir";
+	    unlink "w$len.pag";
+	    eval "dbmopen(%w$len,'/usr/tmp/w$len',0666)|| die qq/dbm $len:$!/";
+	    die $@ if $@;
+
+	    eval("\$symtab[\$len] = *w$len");
+	    die $@ if $@;
+	}
+	return if $use;
+
+    } else {
+	## first, initialize array of symtab entries.
+	foreach $len ($minlen .. $maxlen) {
+	    next if $len & 1;
+	    eval("\$symtab[\$len] = *w$len");
+	    die $@ if $@;
+	}
+    }
+
+
+    foreach $name (@_)
+    {
+	open(DIC, $name) || die "can't open [$name]\n";
+	while (<DIC>)
+	{
+  	    #skip name-only entries if so asked.
+	    next if $skipnames && m#^[^/]+/[^/]*\bp[ln]\b[^/]*/$#;
+	    next unless m,^([^ ]+) (\[([^]]+)|/),;
+	    $len = length($word = $1);
+	    if ($2 eq '/') {
+		next if $minkanalen == 0;
+		## readingless (kana-only) entry
+		next if $len<$minkanalen||$len>$maxlen;#skip if too long/short
+	    } else {
+		## reading (kanji) entry.
+		if ($minkanalen) {
+		   ## check reading as well.
+		   $Rlen = length($Rword = $3);
+		   if ($Rlen >= $minkanalen && $Rlen <= $maxlen) {
+		     local(*w) = $symtab[$Rlen];
+		     if (defined $w{$Rword}) {
+			 $w{$Rword} .= $_;
+		     } else {
+			 $w{$Rword} = $_;
+		     }
+		   }
+		}
+		next if $len<$minlen || $len>$maxlen;#skip if too long/short
+	    }
+	    print STDERR qq/"$name" line $.    \r/ if !defined($quiet) &&
+							($. & 511)==0;
+	    last if defined($limit) && $. > $limit;
+
+	    local(*w) = $symtab[$len];
+	    if (defined $w{$word}) {
+	        $w{$word} .= $_;
+	    } else {
+	        $w{$word} = $_;
+	    }
+	}
+	close(DIC);
+    }
+    print STDERR "                                                 \r"
+	if !defined $quiet;
+}
+
+##
+## arg is filename.
+##
+sub write_count_info
+{
+    local($name) = @_;
+    @keys = sort { length($b) <=> length($a); } keys %count;
+    foreach $key (@keys) {
+	$origkey = $key;
+	while (length($key) > 4) {
+	    substr($key, length($key)-2) = ''; ## remove last character;
+	    if (defined $count{$key})
+	    {
+		$count{$key} += $count{$origkey};
+		delete $count{$origkey};
+		$len = length($key);
+		$origlen = length($origkey);
+		local(*w1, *w2) = ($symtab[$len], $symtab[$origlen]);
+		$w1{$key} .= $w2{$origkey};
+		delete $w2{$origkey};
+		last;
+	    }
+	}
+    }
+
+    undef @new;
+    while (($key, $value) = each %count) {
+	$len = length($key);
+	local(*w) = $symtab[$len];
+	$x = $w{$key};
+	push(@new, sprintf("%4d: $x", $value));
+    }
+
+    open(OUT, ">$name") || die "can't open [$name] for writing\n";
+    foreach (sort {
+			if    ($a gt $b) { -1; }
+			elsif ($a lt $b) {  1; }
+			else {
+			    ($x) = ($a =~ m/\[((\S\S)+)]/);
+			    ($y) = ($b =~ m/\[((\S\S)+)]/);
+			    if    ($x lt $y) { -1; }
+			    elsif ($x gt $y) {  1; }
+			    else { 0; };
+			}
+                 } @new) {
+	@lines = split(/\n/);
+	print OUT shift(@lines), "\n";
+	print(OUT "      ", shift(@lines), "\n") while @lines;
+    }
+    close(OUT);
+}
+
+
+##
+## Converts Shift-JIS to EUC inline.
+##
+sub line_sjis_to_jis
+{
+    local($len) = length($_[0]);
+    local($at, $hi, $lo) = 0;
+
+    while ($at < $len) {
+	($hi, $lo) = unpack("CC",substr($_[0], $at, 2));
+	if (($hi >= 129 && $hi <= 159) || ($hi >= 224 && $hi <= 239)) {
+	    if (($lo >= 64  && $lo <= 126) || ($lo >= 128 && $lo <= 252)) {
+		$hi = (($hi - ($hi < 160 ? 112 : 176)) << 1) - ($lo < 159);
+		$lo -= ($lo < 159 ? ($lo > 127 ? 32 : 31) : 126);
+		substr($_[0], $at, 2) = pack("CC", $hi|0x80, $lo|0x80);
+	    }
+	    $at += 2;
+	} else {
+	    $at += 1;
+	}
+    }
+}
+
+## dummy function to quite warnings.
+sub dummy {
+   1 || &dummy || $version;
+}
+
+#############################################################################
+#############################################################################
+## The rest of the program has been machine-generated.
+##  ``Don't try this at home, folks''.
+#############################################################################
+
+sub do_conj_init {
+  %can_conj = (
+    "\xa4\xa4",1, "\xa4\xa6",1, "\xa4\xa8",1, "\xa4\xad",1, 
+    "\xa4\xae",1, "\xa4\xaf",1, "\xa4\xb1",1, "\xa4\xb2",1, "\xa4\xb5",1, 
+    "\xa4\xb7",1, "\xa4\xb9",1, "\xa4\xba",1, "\xa4\xbb",1, "\xa4\xbf",1, 
+    "\xa4\xc0",1, "\xa4\xc1",1, "\xa4\xc6",1, "\xa4\xc7",1, "\xa4\xcb",1, 
+    "\xa4\xcd",1, "\xa4\xd0",1, "\xa4\xd3",1, "\xa4\xd9",1, "\xa4\xdf",1, 
+    "\xa4\xe9",1, "\xa4\xea",1, "\xa4\xeb",1, "\xa4\xec",1, "\xa4\xed",1, 
+    "\xa4\xf3",1, );
+  %start_conj_8 = (
+    "\xa4\xa4",1, "\xa4\xad",1, "\xa4\xae",1, "\xa4\xb7",1, 
+    "\xa4\xc1",1, "\xa4\xcb",1, "\xa4\xd3",1, "\xa4\xde",1, "\xa4\xdf",1, 
+    "\xa4\xea",1, );
+  %start_conj_2 = (
+    "\xa4\xa4",1, "\xa4\xa8",1, "\xa4\xad",1, "\xa4\xae",1, 
+    "\xa4\xaf",1, "\xa4\xb1",1, "\xa4\xb2",1, "\xa4\xb5",1, "\xa4\xb7",1, 
+    "\xa4\xba",1, "\xa4\xbb",1, "\xa4\xbf",1, "\xa4\xc1",1, "\xa4\xc6",1, 
+    "\xa4\xcb",1, "\xa4\xcd",1, "\xa4\xd3",1, "\xa4\xd9",1, "\xa4\xdf",1, 
+    "\xa4\xea",1, "\xa4\xec",1, "\xa4\xed",1, );
+  %start_conj_4 = (
+    "\xa4\xa4",1, "\xa4\xa8",1, "\xa4\xaa",1, "\xa4\xab",1, 
+    "\xa4\xac",1, "\xa4\xaf",1, "\xa4\xb1",1, "\xa4\xb2",1, "\xa4\xb3",1, 
+    "\xa4\xb4",1, "\xa4\xb5",1, "\xa4\xb6",1, "\xa4\xb7",1, "\xa4\xbb",1, 
+    "\xa4\xbd",1, "\xa4\xbf",1, "\xa4\xc3",1, "\xa4\xc6",1, "\xa4\xc8",1, 
+    "\xa4\xca",1, "\xa4\xcd",1, "\xa4\xce",1, "\xa4\xcf",1, "\xa4\xd0",1, 
+    "\xa4\xd1",1, "\xa4\xd9",1, "\xa4\xdc",1, "\xa4\xde",1, "\xa4\xe2",1, 
+    "\xa4\xe8",1, "\xa4\xe9",1, "\xa4\xec",1, "\xa4\xed",1, "\xa4\xef",1, 
+    "\xa4\xf3",1, "\xbd\xaa",1, "\xbd\xd0",1, );
+  %start_conj_10 = (
+    "\xa4\xa4",1, "\xa4\xab",1, "\xa4\xac",1, "\xa4\xad",1, 
+    "\xa4\xae",1, "\xa4\xaf",1, "\xa4\xb5",1, "\xa4\xb6",1, "\xa4\xb7",1, 
+    "\xa4\xbf",1, "\xa4\xc1",1, "\xa4\xca",1, "\xa4\xcb",1, "\xa4\xcf",1, 
+    "\xa4\xd0",1, "\xa4\xd1",1, "\xa4\xd3",1, "\xa4\xde",1, "\xa4\xdf",1, 
+    "\xa4\xe9",1, "\xa4\xea",1, "\xa4\xef",1, );
+  %start_conj_6 = (
+    "\xa4\xa4",1, "\xa4\xab",1, "\xa4\xac",1, "\xa4\xad",1, 
+    "\xa4\xae",1, "\xa4\xb1",1, "\xa4\xb5",1, "\xa4\xb6",1, "\xa4\xb7",1, 
+    "\xa4\xb9",1, "\xa4\xbd",1, "\xa4\xbf",1, "\xa4\xc1",1, "\xa4\xc3",1, 
+    "\xa4\xca",1, "\xa4\xcb",1, "\xa4\xcf",1, "\xa4\xd0",1, "\xa4\xd1",1, 
+    "\xa4\xd3",1, "\xa4\xde",1, "\xa4\xdf",1, "\xa4\xe4",1, "\xa4\xe9",1, 
+    "\xa4\xea",1, "\xa4\xef",1, "\xa4\xf3",1, );
+}
+sub do_conj {
+  local($try) = @_;
+  return 0 if !defined $can_conj{substr($try, -2)};
+  local($len) = length($try);
+  study $try;
+  if ($len > 10 && defined $start_conj_10{substr($try,-10, 2)}) {
+    return &check($try) if $try =~ s/(\xa4\xca\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb|\xa4\xcb\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6)$/\xa4\xcc/;
+    return &check($try) if $try =~ s/(\xa4\xac\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb|\xa4\xae\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6)$/\xa4\xb0/;
+    return &check($try) if $try =~ s/\xa4\xcf\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb$/\xa4\xd5/;
+    return &check($try) if $try =~ s/(\xa4\xab\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb|\xa4\xad\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6)$/\xa4\xaf/;
+    return &check($try) if $try =~ s/(\xa4\xa4\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6|\xa4\xef\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb)$/\xa4\xa6/;
+    return &check($try) if $try =~ s/\xa4\xb6\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb$/\xa4\xba/;
+    return &check($try) if $try =~ s/(\xa4\xde\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb|\xa4\xdf\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6)$/\xa4\xe0/;
+    return &check($try) if $try =~ s/(\xa4\xd0\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb|\xa4\xd3\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6)$/\xa4\xd6/;
+    if ($try =~ s/\xa4\xb5\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb$//) {
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xb9");
+      return 0;
+    }
+    return &check($try) if $try =~ s/\xa4\xb7\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6$/\xa4\xb9/;
+    return &check($try) if $try =~ s/\xa4\xaf\xa4\xca\xa4\xab\xa4\xc3\xa4\xbf$/\xa4\xa4/;
+    return &check($try) if $try =~ s/(\xa4\xbf\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb|\xa4\xc1\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6)$/\xa4\xc4/;
+    return &check($try) if $try =~ s/\xa4\xd1\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb$/\xa4\xd7/;
+    return &check($try) if $try =~ s/(\xa4\xe9\xa4\xbb\xa4\xe9\xa4\xec\xa4\xeb|\xa4\xea\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6)$/\xa4\xeb/;
+  }
+  if ($len > 8 && defined $start_conj_8{substr($try,-8, 2)}) {
+    return &check($try) if $try =~ s/\xa4\xae(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4)$/\xa4\xb0/;
+    return &check($try) if $try =~ s/(\xa4\xde\xa4\xb7\xa4\xe7\xa4\xa6|\xa4\xea(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4))$/\xa4\xeb/;
+    return &check($try) if $try =~ s/\xa4\xc1(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4)$/\xa4\xc4/;
+    return &check($try) if $try =~ s/\xa4\xa4(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4)$/\xa4\xa6/;
+    return &check($try) if $try =~ s/\xa4\xdf(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4)$/\xa4\xe0/;
+    return &check($try) if $try =~ s/\xa4\xad(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4)$/\xa4\xaf/;
+    return &check($try) if $try =~ s/\xa4\xb7(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4)$/\xa4\xb9/;
+    return &check($try) if $try =~ s/\xa4\xd3(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4)$/\xa4\xd6/;
+    return &check($try) if $try =~ s/\xa4\xcb(\xa4\xb9\xa4\xae\xa4\xeb|\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4)$/\xa4\xcc/;
+  }
+  if ($len > 6 && defined $start_conj_6{substr($try,-6, 2)}) {
+    return &check($try) if $try =~ s/(\xa4\xbd\xa4\xa6\xa4\xc0|\xa4\xca(\xa4\xac\xa4\xe9|\xa4\xb5\xa4\xa4)|\xa4\xcb(\xa4\xa4\xa4\xaf|\xa4\xaf\xa4\xa4|\xa4\xca\xa4\xeb|\xb9\xd4\xa4\xaf)|\xa4\xde(\xa4\xb7\xa4\xbf|\xa4\xbb\xa4\xf3)|\xa4\xe4\xa4\xb9\xa4\xa4|\xa4\xe9(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf))|\xa4\xea(\xa4\xab\xa4\xbf|\xa4\xbf\xa4\xa4|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9))$/\xa4\xeb/;
+    return &check($try) if $try =~ s/(\xa4\xbf(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)|\xa4\xc1(\xa4\xab\xa4\xbf|\xa4\xbf\xa4\xa4|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9))$/\xa4\xc4/;
+    return &check($try) if $try =~ s/(\xa4\xb5(\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)|\xa4\xb7(\xa4\xab\xa4\xbf|\xa4\xbf(\xa4\xa4|\xa4\xe9|\xa4\xea)|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9))$/\xa4\xb9/;
+    return &check($try) if $try =~ s/(\xa4\xca(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)|\xa4\xcb(\xa4\xab\xa4\xbf|\xa4\xbf\xa4\xa4|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9))$/\xa4\xcc/;
+    return &check($try) if $try =~ s/(\xa4\xd0(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)|\xa4\xd3(\xa4\xab\xa4\xbf|\xa4\xbf\xa4\xa4|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9))$/\xa4\xd6/;
+    return &check($try) if $try =~ s/(\xa4\xde(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)|\xa4\xdf(\xa4\xab\xa4\xbf|\xa4\xbf\xa4\xa4|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9))$/\xa4\xe0/;
+    return &check($try) if $try =~ s/\xa4\xd1(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)$/\xa4\xd7/;
+    return &check($try) if $try =~ s/\xa4\xb6(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)$/\xa4\xba/;
+    if ($try =~ s/\xa4\xf3\xa4\xc0\xa4\xe9$//) {
+      return 1 if &check($try . "\xa4\xcc");
+      return 1 if &check($try . "\xa4\xe0");
+      return 1 if &check($try . "\xa4\xd6");
+      return 0;
+    }
+    return &check($try) if $try =~ s/\xa4\xcf(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)$/\xa4\xd5/;
+    return &check($try) if $try =~ s/(\xa4\xa4(\xa4\xab\xa4\xbf|\xa4\xbf\xa4\xa4|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9)|\xa4\xef(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb))$/\xa4\xa6/;
+    return &check($try) if $try =~ s/(\xa4\xa4\xa4\xbf(\xa4\xe9|\xa4\xea)|\xa4\xab(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)|\xa4\xad(\xa4\xab\xa4\xbf|\xa4\xbf\xa4\xa4|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9))$/\xa4\xaf/;
+    return &check($try) if $try =~ s/(\xa4\xa4\xa4\xc0(\xa4\xe9|\xa4\xea)|\xa4\xac(\xa4\xbb\xa4\xeb|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xec\xa4\xeb)|\xa4\xae(\xa4\xab\xa4\xbf|\xa4\xbf\xa4\xa4|\xa4\xde\xa4\xb9|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9))$/\xa4\xb0/;
+    return &check($try) if $try =~ s/\xa4\xe9\xa4\xec\xa4\xeb$/\xa4\xeb/;
+    if ($try =~ s/\xa4\xb9\xa4\xae\xa4\xeb$//) {
+      return 1 if &check($try . "\xa4\xa4");
+      return 1 if &check($try . "\xa4\xeb");
+      return 0;
+    }
+    if ($try =~ s/\xa4\xb5\xa4\xbb\xa4\xeb$//) {
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xb9");
+      return 0;
+    }
+    if ($try =~ s/\xa4\xc3\xa4\xbf\xa4\xea$//) {
+      return 1 if &check($try . "\xa4\xc4");
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xa6");
+      return 0;
+    }
+    return &check($try) if $try =~ s/(\xa4\xab\xa4\xc3\xa4\xbf|\xa4\xb1\xa4\xec\xa4\xd0)$/\xa4\xa4/;
+    if ($try =~ s/\xa4\xf3\xa4\xc0\xa4\xea$//) {
+      return 1 if &check($try . "\xa4\xcc");
+      return 1 if &check($try . "\xa4\xe0");
+      return 1 if &check($try . "\xa4\xd6");
+      return 0;
+    }
+    if ($try =~ s/\xa4\xc3\xa4\xbf\xa4\xe9$//) {
+      return 1 if &check($try . "\xa4\xc4");
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xa6");
+      return 0;
+    }
+  }
+  if ($len > 4 && defined $start_conj_4{substr($try,-4, 2)}) {
+    return &check($try) if $try =~ s/(\xa4\xab\xa4\xbf|\xa4\xbf(\xa4\xa4|\xa4\xe9|\xa4\xea)|\xa4\xca(\xa4\xa4|\xa4\xaf)|\xa4\xde\xa4\xb9|\xa4\xe8\xa4\xa6|\xa4\xe9\xa4\xba|\xa4\xed\xa4\xa6|\xbd\xaa\xa4\xeb|\xbd\xd0\xa4\xb9)$/\xa4\xeb/;
+    return &check($try) if $try =~ s/(\xa4\xa4(\xa4\xbf|\xa4\xc6)|\xa4\xab\xa4\xba|\xa4\xb1(\xa4\xd0|\xa4\xeb)|\xa4\xb3\xa4\xa6)$/\xa4\xaf/;
+    return &check($try) if $try =~ s/(\xa4\xb5\xa4\xba|\xa4\xb7(\xa4\xbf|\xa4\xc6)|\xa4\xbb(\xa4\xd0|\xa4\xeb))$/\xa4\xb9/;
+    return &check($try) if $try =~ s/(\xa4\xa8(\xa4\xd0|\xa4\xeb)|\xa4\xaa\xa4\xa6|\xa4\xef\xa4\xba)$/\xa4\xa6/;
+    return &check($try) if $try =~ s/(\xa4\xbf\xa4\xba|\xa4\xc6(\xa4\xd0|\xa4\xeb)|\xa4\xc8\xa4\xa6)$/\xa4\xc4/;
+    return &check($try) if $try =~ s/(\xa4\xac\xa4\xeb|\xa4\xaf\xa4\xc6)$/\xa4\xa4/;
+    if ($try =~ s/\xa4\xec\xa4\xd0$//) {
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xe0");
+      return 0;
+    }
+    return &check($try) if $try =~ s/\xa4\xd1\xa4\xba$/\xa4\xd7/;
+    return &check($try) if $try =~ s/(\xa4\xa4(\xa4\xc0|\xa4\xc7)|\xa4\xac\xa4\xba|\xa4\xb2(\xa4\xd0|\xa4\xeb)|\xa4\xb4\xa4\xa6)$/\xa4\xb0/;
+    if ($try =~ s/\xa4\xf3\xa4\xc0$//) {
+      return 1 if &check($try . "\xa4\xcc");
+      return 1 if &check($try . "\xa4\xe0");
+      return 1 if &check($try . "\xa4\xd6");
+      return 0;
+    }
+    return &check($try) if $try =~ s/(\xa4\xde\xa4\xba|\xa4\xe2\xa4\xa6)$/\xa4\xe0/;
+    return &check($try) if $try =~ s/(\xa4\xd0\xa4\xba|\xa4\xd9(\xa4\xd0|\xa4\xeb)|\xa4\xdc\xa4\xa6)$/\xa4\xd6/;
+    return &check($try) if $try =~ s/\xa4\xcf\xa4\xba$/\xa4\xd5/;
+    return &check($try) if $try =~ s/(\xa4\xca\xa4\xba|\xa4\xcd(\xa4\xd0|\xa4\xeb)|\xa4\xce\xa4\xa6)$/\xa4\xcc/;
+    if ($try =~ s/\xa4\xf3\xa4\xc7$//) {
+      return 1 if &check($try . "\xa4\xcc");
+      return 1 if &check($try . "\xa4\xe0");
+      return 1 if &check($try . "\xa4\xd6");
+      return 0;
+    }
+    return &check($try) if $try =~ s/\xa4\xb6\xa4\xba$/\xa4\xba/;
+    if ($try =~ s/\xa4\xbd\xa4\xa6$//) {
+      return 1 if &check($try . "\xa4\xa4");
+      return 1 if &check($try . "\xa4\xb9");
+      return 0;
+    }
+    if ($try =~ s/\xa4\xec\xa4\xeb$//) {
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xe0");
+      return 0;
+    }
+    if ($try =~ s/\xa4\xc3\xa4\xbf$//) {
+      return 1 if &check($try . "\xa4\xc4");
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xa6");
+      return 0;
+    }
+    if ($try =~ s/\xa4\xc3\xa4\xc6$//) {
+      return 1 if &check($try . "\xa4\xc4");
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xa6");
+      return 0;
+    }
+  }
+  if ($len > 2 && defined $start_conj_2{substr($try,-2, 2)}) {
+    return &check($try) if $try =~ s/(\xa4\xae|\xa4\xb2)$/\xa4\xb0/;
+    return &check($try) if $try =~ s/(\xa4\xcb|\xa4\xcd)$/\xa4\xcc/;
+    if ($try =~ s/\xa4\xdf$//) {
+      return 1 if &check($try . "\xa4\xa4");
+      return 1 if &check($try . "\xa4\xe0");
+      return 0;
+    }
+    return &check($try) if $try =~ s/(\xa4\xa4|\xa4\xa8)$/\xa4\xa6/;
+    return &check($try) if $try =~ s/(\xa4\xba|\xa4\xbf|\xa4\xea|\xa4\xed)$/\xa4\xeb/;
+    if ($try =~ s/\xa4\xc6$//) {
+      return 1 if &check($try . "\xa4\xc4");
+      return 1 if &check($try . "\xa4\xeb");
+      return 0;
+    }
+    return &check($try) if $try =~ s/\xa4\xc1$/\xa4\xc4/;
+    return &check($try) if $try =~ s/(\xa4\xad|\xa4\xb1)$/\xa4\xaf/;
+    return &check($try) if $try =~ s/(\xa4\xb7|\xa4\xbb)$/\xa4\xb9/;
+    return &check($try) if $try =~ s/(\xa4\xd3|\xa4\xd9)$/\xa4\xd6/;
+    if ($try =~ s/\xa4\xec$//) {
+      return 1 if &check($try . "\xa4\xeb");
+      return 1 if &check($try . "\xa4\xe0");
+      return 0;
+    }
+    return &check($try) if $try =~ s/(\xa4\xaf|\xa4\xb5)$/\xa4\xa4/;
+  }
+  return 0;
+}
+; 1;
